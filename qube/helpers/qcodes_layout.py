@@ -219,7 +219,7 @@ def get_sweep_dim(values):
 
 
 def display_layout(
-        experiment: qube.Experiment,
+        experiment: qube.Controls,
         run_id: int,
         # data: qc.dataset.data_set.DataSet = None,  # Optional: Extract information from a dataset
         gds_path='..\\configurations\\sample.GDS',

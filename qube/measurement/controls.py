@@ -37,7 +37,7 @@ str_sw_cntrlr = 'sweep_controller'
 
 val_pos_int = vals.Lists(vals.Ints(min_value = 1))
 
-class Experiment(InstrumentBase):
+class Controls(InstrumentBase):
     """
     This is a controller class that handles the control parameters of
     your experiment. Your control parameters are added as instances of the
@@ -47,8 +47,8 @@ class Experiment(InstrumentBase):
     
     # In ../tools/startup.ipynb define the controls instance:
     
-    from tools.drivers.Experiment import *
-    controls = Experiment()
+    from tools.drivers.Controls import *
+    controls = Controls()
     
     # In ../configurations/c0_your_config.ipynb add your controls:
     # Add some control parameter (cp0) as DelegateParameter with the
@@ -385,7 +385,7 @@ class Experiment(InstrumentBase):
              ):
         """
         This function feeds Sweep.execute_sweep with input arguments that
-        are adjusted for usage with the Experiment class.
+        are adjusted for usage with the Controls class.
         
         Example of usage:
         
@@ -405,9 +405,9 @@ class Experiment(InstrumentBase):
           
           - Control and readout parameters can be provided also as string (name within controls) 
           
-          - By default all readouts of the Experiment instance are used
+          - By default all readouts of the Controls instance are used
           
-          - By default the current settings the Experiment instance are
+          - By default the current settings the Controls instance are
             used for the configuration applied before and after the measurement
         
         For input arguments see:
@@ -431,7 +431,7 @@ class Experiment(InstrumentBase):
             instructions[k][1] = self._turn_key_to_instance(instructions[k][1])
         kwargs[var_str_instr] = instructions
         
-        # If no readouts are provided, use readouts of Experiment object.
+        # If no readouts are provided, use readouts of Controls object.
         if var_str_readouts not in kwargs.keys():
             kwargs[var_str_readouts] = self.get_readouts(as_instance=True)
         else:
@@ -448,7 +448,7 @@ class Experiment(InstrumentBase):
             for key, value in temp_dict.items():
                 kwargs[var_str_init_conf][key] = value
             
-        # Use apply and readout functions of Experiment class:
+        # Use apply and readout functions of Controls class:
         kwargs[var_str_apply] = self.apply
         kwargs[var_str_readout] = self.readout
         
