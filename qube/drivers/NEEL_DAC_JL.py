@@ -202,8 +202,9 @@ class NEEL_DAC(Instrument):
                            initial_value=delay_between_steps,
                            )
 
-        self.sequencer = NEEL_DAC_Sequencer(parent=self)
         self.open()
+        self.sequencer = NEEL_DAC_Sequencer(parent=self)
+        self.lockin = NEEL_DAC_LockIn(parent=self)
         if initial_value:
             self.move_all_to(initial_value)
 
@@ -682,7 +683,6 @@ class NEEL_DAC_Sequencer(InstrumentChannel):
     def start(self):
         """
         Start fast sequence
-        Each time fast sequence is started, it is necessary to set sample count.
         """
         self.status(True)
 
@@ -815,7 +815,7 @@ class NEEL_DAC_Sequencer(InstrumentChannel):
         order_number = join_numbers(order_number, length, final_size=64)
         return order_number
 
-    def add_channel(self, param: Union[Parameter, DelegateParameter]):
+    def add_channel(self, param: Union[Parameter, DelegateParameter, NEEL_DAC_Channel]):
         orders = dict(self.orders_ref)
         index = len(self.used_channels)
         if index + 1 > self.n_channels:
@@ -824,18 +824,20 @@ class NEEL_DAC_Sequencer(InstrumentChannel):
         if rhasattr(param, 'source.instrument.panel'):
             # For DelegateParameter from controls
             instr = param.source.instrument
-            panel = getattr(instr, 'panel')
-            channel = getattr(instr, 'channel')
             name = param.name
         elif rhasattr(param, 'instrument.panel'):
             # For NEEL_DAC_Channel.v
             instr = param.instrument
-            panel = getattr(instr, 'panel')
-            channel = getattr(instr, 'channel')
             name = instr.name
+        elif rhasattr(param, 'panel'):
+            # For NEEL_DAC_Channel
+            instr = param
+            name = instr.v.name
         else:
             raise ValueError('Not a valid sequence channel to move')
 
+        panel = getattr(instr, 'panel')
+        channel = getattr(instr, 'channel')
         attr_str = f'p{panel}.c{channel}'
         if attr_str not in orders.keys():
             # Set sequence and update orders_ref and used_channels
@@ -1226,10 +1228,9 @@ class NEEL_DAC_Sequencer(InstrumentChannel):
         # self.set_sample_count(counts)
 
 
-# TODO
 class NEEL_DAC_LockIn(InstrumentChannel):
     """
-    This class holds information about fast sequence
+    This class holds information about Lock-In mode
 
     Args:
         parent (Instrument): NEEL_DAC
@@ -1240,13 +1241,202 @@ class NEEL_DAC_LockIn(InstrumentChannel):
                  **kwargs) -> None:
         super().__init__(parent, 'lock_in', **kwargs)
         self.dac = self._parent
+        self._status = False
+        self._frequency = 0  # Hz
+        self._amplitude = 0  # V
+        self._channel = [0, 0]  # [panel, channel]
+        # self._channel = 0 # 0 - 7
 
-    def send_Xmit_order(self, order: int):
+        self.add_parameter('status',
+                           label='Lock-in status',
+                           get_cmd=self.get_status,
+                           set_cmd=self.set_status,
+                           # initial_value=self._status,
+                           )
+
+        self.add_parameter('frequency',
+                           label='Lock-in frequency',
+                           unit='Hz',
+                           get_cmd=self.get_frequency,
+                           set_cmd=self.set_frequency,
+                           get_parser=float,
+                           set_parser=float,
+                           post_delay=0.45,  # HE: wait after move such that the lock-in-detector can follow
+                           vals=vals.Numbers(0.0, 50000.0),
+                           # initial_value=self._frequency,
+                           )
+
+        self.add_parameter('amplitude',
+                           label='Lock-in amplitude',
+                           unit='V',
+                           get_cmd=self.get_amplitude,
+                           set_cmd=self.set_amplitude,
+                           get_parser=float,
+                           set_parser=float,
+                           post_delay=0.45,  # HE: wait after move such that the lock-in-detector can follow
+                           vals=vals.Numbers(0.0, abs(self.dac.voltage_range) * 2),  # changed; before it was (0,2)
+                           # initial_value=self._amplitude,
+                           )
+
+        self.add_parameter('channel',  # HE
+                           label='Lock-in channel',
+                           get_cmd=self.get_channel,
+                           set_cmd=self.set_channel,
+                           get_parser=list,
+                           set_parser=list,
+                           vals=vals.Lists(vals.Ints(0, self.dac.max_channels)),
+                           # initial_value=self._channel,
+                           )
+
+        self.configure_analysis()
+        self.stop()
+
+    def stop(self):
+        """
+        Stop lock-in output if running.
+        """
+        self.status(False)
+
+    def start(self):
+        """
+        Start lock-in output
+        """
+        self.status(True)
+
+    def send_Xmit_order(self, order: int, stop: bool = True, start: bool = True):
+        """
+        order: Xmit order
+        stop: flag to stop lock-in output before sending the order
+        """
+        if self._status and stop:  # running and stop flag
+            self.stop()
         self.dac.send_Xmit_order(order)
+        if start:
+            self.start()
+
+    def get_status(self):
+        return self._status
+
+    def set_status(self, val: bool):
+        self._status = val
+        stop = not val
+        v = 1 if stop else 0
+        order_number = join_8_8bit264bit(2, 3, 0, 0, 0, 0, 0, v)
+        self.send_Xmit_order(order_number, stop=False, start=False)
+
+    def get_frequency(self):
+        return self._frequency
+
+    def set_frequency(self, value: float):
+        """
+        Stop before sending order + Start
+        value: frequency in Hz
+        """
+        self._frequency = value
+        order_number = self._Xmit_order_frequency(value)
+        self.send_Xmit_order(order_number, stop=True, start=True)
+
+    def _Xmit_order_frequency(self, value: float):
+        f = 25000 / value
+        if f < 1:
+            f = 1
+        elif f > 4e9:
+            f = 4e9
+        f = np.uint32(f)
+        a, b = split_number(f, size=32)
+        c, d = split_number(a, size=16)
+        e, f = split_number(b, size=16)
+        order_number = join_8_8bit264bit(2, 4, 0, 0, c, d, e, f)
+        return order_number
+
+    def get_amplitude(self):
+        return self._amplitude
+
+    def set_amplitude(self, value: float):
+        self._amplitude = np.abs(value)
+        order_number = self._Xmit_order_amplitude(value)
+        self.send_Xmit_order(order_number, stop=True, start=True)
+
+    def _Xmit_order_amplitude(self, value: float):
+        vrange = abs(self.dac.voltage_range)
+        value = -vrange if value < -vrange else value
+        value = +vrange if value > +vrange else value
+        vmax = 2 * vrange
+        res = 2 ** self.dac.resolution_bits
+        a = value / vmax * res
+        a = np.uint16(a)
+        b, c = split_number(a, 16)
+        order_number = join_8_8bit264bit(2, 2, 0, 0, 0, 0, b, c)
+        return order_number
+
+    def get_channel(self):
+        return self._channel
+
+    def set_channel(self, value: List[int]):
+        panel, channel = value
+        order_number = join_8_8bit264bit(2, 1, 0, 0, 0, 0, panel, channel)
+        self.send_Xmit_order(order_number, stop=True, start=True)
+
+    def set_channel_by_param(self, param: Union[Parameter, DelegateParameter, NEEL_DAC_Channel]):
+        if rhasattr(param, 'source.instrument.panel'):
+            # For DelegateParameter from controls
+            instr = param.source.instrument
+        elif rhasattr(param, 'instrument.panel'):
+            # For NEEL_DAC_Channel.v
+            instr = param.instrument
+        elif rhasattr(param, 'panel'):
+            # For NEEL_DAC_Channel
+            instr = param
+        else:
+            raise ValueError('Not a valid parameter')
+        panel = instr.panel
+        channel = instr.channel
+        self.set_channel([panel, channel])
+
+    """
+    Analysis
+    JL: What are all these "analysis" parameters?
+    """
+
+    def configure_analysis(self):
+        # JL: I don't know what is this so I copy/paste from the old driver
+        self.set_anlaysis_send_back_data(1)  # average
+        self.set_analysis_dt_over_tau(8.00006091594696044921875000000000E-6)
+
+    def set_anlaysis_send_back_data(self, value: int):
+        """
+        value: 0 (lock-in) and 1 (average)
+        JL: What is this?
+        """
+        order_number = join_8_8bit264bit(3, 1, 0, 0, 0, 0, 0, value)
+        self.send_Xmit_order(order_number, stop=True, start=False)
+
+    def set_analysis_dt_over_tau(self, value):
+        """
+        value: ???
+        JL: What is this?
+        """
+        dt_over_tau = value * (2 ** 32)  # Convert Fixed point to 32 bit integer
+        order_number = join_numbers(3, 2, 16)
+        order_number = join_numbers(order_number, 0, 32)
+        order_number = join_numbers(order_number, dt_over_tau, 64)
+        self.send_Xmit_order(order_number, stop=True, start=False)
+
+    def set_analysis_null(self):
+        order_number = join_8_8bit264bit(3, 0, 0, 0, 0, 0, 0, 0)
+        self.send_Xmit_order(order_number, stop=True, start=False)
+
+    def set_analysis_voltage_range(self, value: int):
+        """
+        value: 0 (10V), 1 (5V), 2 (1V)
+        JL: What is this?
+        """
+        order_number = join_8_8bit264bit(3, 3, 0, 0, 0, 0, 0, value)
+        self.send_Xmit_order(order_number, stop=True, start=False)
 
 
 class Virtual_NEEL_DAC(NEEL_DAC):
-    print_order = True
+    print_order = False
 
     def open(self):
         print(f'Connected to: Virtual_NEEL_DAC with {self.address}')
@@ -1360,3 +1550,4 @@ if __name__ == '__main__':
 
     seq.start()
     """
+    li = dac.lockin

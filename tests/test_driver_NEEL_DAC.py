@@ -6,53 +6,6 @@ from qcodes import validators as vals
 from qube import Controls
 from qube.drivers.NEEL_DAC_JL import Virtual_NEEL_DAC, NEEL_DAC_Sequencer
 
-#
-# dac = Virtual_NEEL_DAC(
-#     name='DAC',
-#     bitfile='bitfile',
-#     address='address',
-#     panels=[1, 2, 3, 4],
-#     delay_between_steps=1,
-#     # initial_value=0,
-# )
-# dac.print_order = False
-#
-# controls = Controls('controls')
-# TRR = controls.add_control(
-#     'TRR',
-#     source=dac.p2.c2.v,
-#     label='TRR',
-#     unit='V',
-#     initial_value=-1.20,
-#     vals=vals.Numbers(-2.2, 0.3),
-# )
-#
-# TRC = controls.add_control(
-#     'TRC',
-#     source=dac.p3.c3.v,
-#     label='TRC',
-#     unit='V',
-#     initial_value=-1.30,
-#     vals=vals.Numbers(-2.2, 0.3),
-# )
-#
-# seq = dac.sequencer
-# seq.set_ramp_mode(False)
-# # seq.set_channels([dac.p1.c1, gate1, dac.p3.c3.v, 'random'])
-# # print(seq.orders_ref)
-# seq.add_trigger_slot([0, 0, 0, 0, 0])
-# seq.add_wait_slot(1)  # ms
-# seq.add_trigger_slot([0, 1, 0, 0, 0])  # trigger ADC
-# TRR_load = seq.add_move_slot(TRR, -0.1, alias='TRR_load', relative=False)
-# TRC_load = seq.add_move_slot(TRC, -0.2, alias='TRC_load', relative=True)
-# p4c4 = seq.add_move_slot(dac.p4.c4.v, -0.5, alias='p4c4', relative=True)
-# random = seq.add_move_slot(dac.p4.c4.v, -1.0, alias='random', relative=False)
-# seq.add_end_slot()
-
-
-# TRR_back = seq.add_move_slot(TRR, -2.3, alias='TRR_back', relative=False)
-# TRC_back = seq.add_move_slot(TRC, 3, alias='TRC_back', relative=True)
-
 V = Virtual_NEEL_DAC
 V.print_order = False
 
@@ -229,6 +182,8 @@ class Test_NEEL_DAC_Sequencer(unittest.TestCase):
         self.assertEqual(seq.slots[s2.name], s2)
         self.assertEqual(seq.orders[1], ['wait', 1])
 
+        # To finish
+
         # seq.add_trigger_slot([0, 1, 0, 0, 0])  # trigger ADC
         # TRR_load = seq.add_move_slot(TRR, -0.1, alias='TRR_load', relative=False)
         # TRC_load = seq.add_move_slot(TRC, -0.2, alias='TRC_load', relative=True)
@@ -238,6 +193,28 @@ class Test_NEEL_DAC_Sequencer(unittest.TestCase):
 
         # TRR_back = seq.add_move_slot(TRR, -2.3, alias='TRR_back', relative=False)
         # TRC_back = seq.add_move_slot(TRC, 3, alias='TRC_back', relative=True)
+
+
+# TODO
+class Test_NEEL_DAC_LockIn(unittest.TestCase):
+    def test_defaults(self):
+        dac = V(
+            name='test_defaults',
+            bitfile='bitfile',
+            address='address',
+            panels=[1, 2, 4],
+            delay_between_steps=1,
+        )
+        li = dac.lockin
+        # self.assertTrue(isinstance(seq, NEEL_DAC_Sequencer))
+        #
+        # self.assertEqual(len(seq.slots), 0)
+        # self.assertEqual(len(seq.used_channels), 0)
+        # self.assertEqual(len(seq.orders), 0)
+        # seq.set_ramp_mode(False)
+        # self.assertFalse(seq.ramp_mode())
+        # seq.set_sample_count(3)
+        # self.assertEqual(seq.sample_counts(), 3)
 
 
 if __name__ == '__main__':
