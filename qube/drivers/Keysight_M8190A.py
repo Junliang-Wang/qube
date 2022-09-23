@@ -71,9 +71,9 @@ awgFileFolder = "D:\\Shintaro\\Programs\\AWG"
 #    def get_raw(self):
 #        return self.trace
 #    
-#    def set_raw(self, val: np.array):
-#        # Update trace to the given val
-#        self.trace = val
+#    def set_raw(self, value: np.array):
+#        # Update trace to the given value
+#        self.trace = value
 #        # Cast array type to be 16 bit integer to make sure
 #        self.trace = self.trace.astype(np.int16)
 #        N = self.trace.size

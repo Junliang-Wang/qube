@@ -47,7 +47,7 @@ def apply_default(values = None):
     """
     if values != None:
         for parameter,value in values:   # Go through each parameter ...
-            parameter(value)             # ... and set it to its value.  
+            parameter(value)             # ... and set it to its value.
 
 def readout_default(parameters = None):
     """
@@ -120,7 +120,7 @@ class Sweep(InstrumentBase):
                              key: dimension,  value: list of values ordered according to 'sweeps'
       'shape_of_sweeps' ... list of integers indicating the number of points per sweeping dimensions
       'sweep_offsets'   ... dictionary holding offsets in higher dimensions for each sweep.
-                             key: parameter name,  value: number indicating offset value 
+                             key: parameter name,  value: number indicating offset value
                              
                              
     """
@@ -474,7 +474,7 @@ class Sweep(InstrumentBase):
             self.write_sweep_info(datasaver,note,return2initial,fast_sweep)
             
             index_matrix = self.get_indices_for_sweep()
-            print(index_matrix.shape)
+            # print(index_matrix.shape)
             for i,   index_list  in enumerate(index_matrix):
                 
                 # >> index_list << contains index pointers to each sweep-parameter value for each step.

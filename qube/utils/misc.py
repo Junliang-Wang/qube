@@ -1,4 +1,6 @@
+import functools
 from copy import deepcopy
+
 import numpy as np
 
 
@@ -203,6 +205,32 @@ def repr_args(dict_):
     args = [f'{key}={value}' for key, value in dict_.items()]
     args = join_list(args, ',')
     return args
+
+
+"""
+For nested get/set/hasattrs
+From: https://stackoverflow.com/questions/31174295/getattr-and-setattr-on-nested-objects/31174427?noredirect=1#comment86638618_31174427
+"""
+
+
+def rsetattr(obj, attr, val):
+    pre, _, post = attr.rpartition('.')
+    return setattr(rgetattr(obj, pre) if pre else obj, post, val)
+
+
+def rgetattr(obj, attr, *args):
+    def _getattr(obj, attr):
+        return getattr(obj, attr, *args)
+
+    return functools.reduce(_getattr, [obj] + attr.split('.'))
+
+
+def rhasattr(obj, attr, *args):
+    try:
+        rgetattr(obj, attr, *args)
+        return True
+    except:
+        return False
 
 
 if __name__ == '__main__':

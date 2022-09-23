@@ -127,7 +127,7 @@ def gradient(dataset, axis=None, edge_order=1):
 def smooth(dataset, window=5, order=3, axis=-1,**kwargs):
     ds = dataset.copy()
     ds.name = f'{ds.name}_smooth'
-    ds.value = savgol_filter(ds.value, window_length=window, polyorder=order, axis=axis,**kwargs)
+    ds.value = savgol_filter(ds.value, window_length=window, polyorder=order, axis=axis, **kwargs)
     old_axes = ds.get_axes(counters=False)
     ds.clear_axes()
     if axis is not None:
@@ -186,7 +186,7 @@ def fft(
             else:
                 ax.name = f'{ax.name}_fftper'
                 ax.unit = f'{ax.unit}'
-                ax.value = 1.0/xdata_freq
+                ax.value = 1.0 / xdata_freq
 
         axs.append(ax)        
 

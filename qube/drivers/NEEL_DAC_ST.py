@@ -141,7 +141,7 @@ class NEEL_DAC_channel(InstrumentChannel):
     This class holds information about each DAC channel.
     
     Args:
-        parent (InstrumentChannel): NEEL_DAC_Bus
+        parent (InstrumentChannel): NEEL_DAC_Panel
         name (str): name of the channel
         channel (int): channel number (0 ~ 7)
         value (float): output value of the DAC.
@@ -181,7 +181,7 @@ class NEEL_DAC_Bus(InstrumentChannel):
     Args:
         parent (Instrument): NEEL_DAC
         name (str): name of the bus
-        bus_number (int): bus_number (typically 0 ~ 4, max 7)
+        bus_number (int): panel_number (typically 0 ~ 4, max 7)
         
     """
     def __init__(self, parent: Instrument, name:str, bus_number:int, **kwargs) -> None:
@@ -216,7 +216,7 @@ class NEEL_DAC(Instrument):
         LI_amplitude (float): lock-in amplitude
         LI_channel (int): panel = N // 8, channel = N % 8
         LI_status (bool): status of lock-in (On: True, Off: False)
-        used_buses (List[int]): list of DAC buses to be used
+        used_buses (List[int]): list of DAC value to be used
         ms2wait (int): wait time between each DAC bit movement
         FS_divider (Union[float, int]): For fast sequence ramp mode it determines time between each DAC step (ms). (trigger from DIO1/panel 9)
                           For fast sequence mode it determines time of pulse from DIO1/panel 9.
@@ -293,8 +293,8 @@ class NEEL_DAC(Instrument):
                            set_parser=int,
                            vals=vals.Ints(0, 63))
         
-        self.add_parameter('used_buses',
-                           label='Used DAC buses',
+        self.add_parameter('value',
+                           label='Used DAC value',
                            get_cmd=self.get_used_buses,
                            set_cmd=self.set_used_buses)
         
@@ -364,7 +364,7 @@ class NEEL_DAC(Instrument):
                            snapshot_get = False,
                            snapshot_value = False,)
         
-        # Initialize used buses
+        # Initialize used value
         self.set_used_buses(used_buses)
         self.set_ms2wait(ms2wait)
         # Define Buses
@@ -587,7 +587,7 @@ class NEEL_DAC(Instrument):
         
         Args:
             mode (int): 0: returns 8 by 8 array,
-                        1: returns information only for used buses
+                        1: returns information only for used value
             fill_modules (bool): whether we set obtained values to sub-modules or not
                                 It is useful when we first define the instrument.
         """
@@ -605,7 +605,7 @@ class NEEL_DAC(Instrument):
                 panel = getattr(self, 'p{:d}'.format(n))
                 for c in range(8):
                     ch = getattr(panel, 'c{:d}'.format(c))
-                    ch.value(dac_values[n,c])
+                    ch.value(dac_values[n, c])
             
         return dac_values
     
@@ -620,7 +620,7 @@ class NEEL_DAC(Instrument):
         
     def DAC_init_values(self, value:float=0.0):
         """
-        Initialize all the DAC values in the used buses to "value".
+        Initialize all the DAC values in the used value to "value".
         
         For the procedure once move all the DAC to -0.1 V and come back 
         to the given "value".
@@ -855,7 +855,7 @@ class NEEL_DAC(Instrument):
             # Start movement
             order_number = join_8_8bit264bit(1,2,0,0,0,0,0,0)
         elif order == 1:
-            # buses to use
+            # value to use
             bus = 0
             for i, b in enumerate(busses_to_use):
                 if b:
@@ -1139,7 +1139,7 @@ class NEEL_DAC(Instrument):
             (0,:) is parameter (0 ~ 15: fast channels, 101: trigger,
             102: timing (ms), 103: jump, else: jump to its index)
             
-	        (1,:) is values. (DAC = value offset, 
+	        (1,:) is values. (DAC = value offset,
             trigger = bit wise value for each trigger (1~4, stop)
 		    timing = ms to wait, jump = # of slot ot jump)]
         """

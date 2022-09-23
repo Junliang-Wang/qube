@@ -85,7 +85,7 @@ class Keysight_E8257D(VisaInstrument):
                                set_cmd='PULM:STAT' + ' {}',
                                get_parser=parse_on_off,
                                # Only listed most common spellings idealy want a
-                               # .upper val for Enum or string
+                               # .upper value for Enum or string
                                vals=vals.Enum('on', 'On', 'ON',
                                               'off', 'Off', 'OFF'))
             self.add_parameter('pulse_src',
@@ -101,7 +101,7 @@ class Keysight_E8257D(VisaInstrument):
                                set_cmd='OUTP:MOD' + ' {}',
                                get_parser=parse_on_off,
                                # Only listed most common spellings idealy want a
-                               # .upper val for Enum or string
+                               # .upper value for Enum or string
                                vals=vals.Enum('on', 'On', 'ON',
                                               'off', 'Off', 'OFF'))
             
@@ -110,7 +110,7 @@ class Keysight_E8257D(VisaInstrument):
                             set_cmd='OUTP' + ' {}',
                             get_parser=parse_on_off,
                             # Only listed most common spellings idealy want a
-                            # .upper val for Enum or string
+                            # .upper value for Enum or string
                             vals=vals.Enum('on', 'On', 'ON',
                                           'off', 'Off', 'OFF'))
         
@@ -119,7 +119,7 @@ class Keysight_E8257D(VisaInstrument):
                             set_cmd='POW:ALC' + ' {}',
                             get_parser=parse_on_off,
                             # Only listed most common spellings idealy want a
-                            # .upper val for Enum or string
+                            # .upper value for Enum or string
                             vals=vals.Enum('on', 'On', 'ON',
                                           'off', 'Off', 'OFF'))
         

@@ -144,7 +144,7 @@ class NEEL_DAC_channel(InstrumentChannel):
     This class holds information about each DAC channel.
     
     Args:
-        parent (InstrumentChannel): NEEL_DAC_Bus
+        parent (InstrumentChannel): NEEL_DAC_Panel
         name (str): name of the channel
         channel (int): channel number (0 ~ 7)
         value (float): output value of the DAC.
@@ -180,7 +180,7 @@ class NEEL_DAC_channel(InstrumentChannel):
         return self.val
     
     def set_value(self, val:float):
-        #print(self.panel,self.channel,val)
+        #print(self.panel,self.channel,value)
         # Set DAC value if it is not np.nan.
         if not np.isnan(val):
             self.dac.DAC_set_value(panel_channel={'panel':self.panel, 'channel':self.channel},
@@ -195,7 +195,7 @@ class NEEL_DAC_Bus(InstrumentChannel):
     Args:
         parent (Instrument): NEEL_DAC
         name (str): name of the bus
-        bus_number (int): bus_number (typically 0 ~ 4, max 7)
+        bus_number (int): panel_number (typically 0 ~ 4, max 7)
         
     """
     def __init__(self, parent: Instrument, name:str, bus_number:int, **kwargs) -> None:
@@ -230,7 +230,7 @@ class NEEL_DAC(Instrument):
         LI_amplitude (float): lock-in amplitude
         LI_channel (int): panel = N // 8, channel = N % 8
         LI_status (bool): status of lock-in (On: True, Off: False)
-        used_buses (List[int]): list of DAC buses to be used
+        used_buses (List[int]): list of DAC value to be used
         ms2wait (int): wait time between each DAC bit movement
         v (dict): dictionary of short-cut-references to NEEL_DAC_CHANNELs via alias-name
         FS_divider (Union[float, int]): For fast sequence ramp mode it determines time between each DAC step (ms). (trigger from DIO1/panel 9)
@@ -264,6 +264,7 @@ class NEEL_DAC(Instrument):
                  **kwargs) -> None:
         super().__init__(name, **kwargs)
         # Address information
+        self.bitFilePath = bitFilePath
         self.bitFilePath = bitFilePath
         self.address =address
         # Define reference to access FPGA.
@@ -347,8 +348,8 @@ class NEEL_DAC(Instrument):
                            initial_value=LI_channel,
                            ) 
         
-        self.add_parameter('used_buses',
-                           label='Used DAC buses',
+        self.add_parameter('value',
+                           label='Used DAC value',
                            get_cmd=self.get_used_buses,
                            set_cmd=self.set_used_buses,
                            initial_value=used_buses,
@@ -437,7 +438,7 @@ class NEEL_DAC(Instrument):
                            snapshot_value = False,
                            )
         
-        # Initialize used buses
+        # Initialize used value
         self.set_used_buses(used_buses)
         self.set_ms2wait(ms2wait)
         # Define Buses
@@ -488,10 +489,10 @@ class NEEL_DAC(Instrument):
     def get_lock_in_channel(self):
         return self._LI_channel
     
-#     def set_lock_in_channel(self, val: int):
-#         self._LI_channel = val
-#         panel = val // 8
-#         channel = val % 8
+#     def set_lock_in_channel(self, value: int):
+#         self._LI_channel = value
+#         panel = value // 8
+#         channel = value % 8
 #         LI_panel_channel = {'panel':panel, 'channel':channel}
 #         if self._LI_status:
 #             # If lock-in is running, once stop it and restart after change.
@@ -672,7 +673,7 @@ class NEEL_DAC(Instrument):
         
         Args:
             mode (int): 0: returns 8 by 8 array,
-                        1: returns information only for used buses
+                        1: returns information only for used value
             fill_modules (bool): whether we set obtained values to sub-modules or not
                                 It is useful when we first define the instrument.
         """
@@ -706,12 +707,12 @@ class NEEL_DAC(Instrument):
         
     def init(self, value:float=0.0):
         """
-        Initialize all the DAC values in the used buses to "value".
+        Initialize all the DAC values in the used value to "value".
         
-        For the procedure once move all the DAC to -0.1 V and come back 
+        For the procedure once move all the DAC to value-0.1 V and come back
         to the given "value".
         """
-        self.move_all_to(-0.01)
+        self.move_all_to(value-0.01) #jl
         self.move_all_to(value)
         
     initialize=init; initialise=init; DAC_init_values=init
@@ -932,7 +933,7 @@ class NEEL_DAC(Instrument):
             # Start movement
             order_number = join_8_8bit264bit(1,2,0,0,0,0,0,0)
         elif order == 1:
-            # buses to use
+            # value to use
             bus = 0
             for i, b in enumerate(busses_to_use):
                 if b:
@@ -1004,7 +1005,7 @@ class NEEL_DAC(Instrument):
         
     def move_all_to(self, value:float=0.0):
         """
-        Move all DAC values in the used buses to "value".
+        Move all DAC values in the used value to "value".
         """
         for i in self._used_buses:
             for j in range(8):
@@ -1163,7 +1164,7 @@ class NEEL_DAC(Instrument):
                 fast_chan_number = 0
 #             elif fast_chan_number > (2**4-1):
 #                 fast_chan_number = (2**4-1)
-#             val = fast_chan_number + (choice << 4)
+#             value = fast_chan_number + (choice << 4)
             elif fast_chan_number > (2**5-1): # HE 32
                 fast_chan_number = (2**5-1)
             val = fast_chan_number + (choice << 4)
@@ -1266,7 +1267,7 @@ class NEEL_DAC(Instrument):
             (0,:) is parameter (0 ~ 15: fast channels, 101: trigger,
             102: timing (ms), 103: jump, else: jump to its index)
             
-	        (1,:) is values. (DAC = value offset, 
+	        (1,:) is values. (DAC = value offset,
             trigger = bit wise value for each trigger (1~4, stop)
 		    timing = ms to wait, jump = # of slot ot jump)]
         """
@@ -1334,7 +1335,7 @@ class NEEL_DAC(Instrument):
         
         order_number = join_numbers(order_number,0,final_size=32)
         val = join_numbers(0,sample_count,final_size=32)
-        
+
         order_number = join_numbers(order_number, val, final_size=64)
         
         self.DAC_Xmit_order(order = order_number)
