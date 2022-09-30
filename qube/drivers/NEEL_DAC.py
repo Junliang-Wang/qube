@@ -2,55 +2,52 @@
 """
 Created 2018/12 by Shintaro
 Modified 2021/02 by Hermann for usage at Wodan; look for "HE:"
-
+Updated 2022/09 by Junliang
 """
 
-from qcodes import Instrument, validators as vals
-from qcodes.instrument.channel import InstrumentChannel, ChannelList
-from qcodes.utils.validators import Validator
-from qcodes.instrument.parameter import ArrayParameter
-
-from typing import List, Dict, Callable, Union
+from math import ceil
+import logging
+from collections import OrderedDict
+from typing import Union, List, Optional
+import numpy as np
+from math import ceil, floor
 
 from nifpga import Session
-from nifpga import nifpga
-import time
-import numpy as np
+from qcodes import Instrument, Parameter, DelegateParameter
+from qcodes import validators as vals
+from qcodes.instrument.channel import InstrumentChannel
 
-import logging
+from qube.utils.misc import rhasattr, rgetattr
 
 log = logging.getLogger(__name__)
-
-bit_file = '..\\tools\\drivers\\fpgabatchhewodan_sbRIO9612RIO0_hewodan_kUFBPXPrLOs.lvbitx'
-ip_address = '192.168.0.3'
-
-channels_per_panel = 8
 
 """-------------------------
  Utility functions
 -------------------------"""
-def split_number(a, size = 32):
+
+
+def split_number(a, size=32):
     """
     Split for example 32bit uint to 2 16bit uint.
-    
+
     Args:
         a:      Input number
         size:   bit size of the input number
-    
+
     Returns:
         b: from upper bits
         c: from lower bits
-    
+
     """
     b = 0
     c = 0
     for i in range(size):
-        if i < size//2:
-            c += a & 2**i
+        if i < size // 2:
+            c += a & 2 ** i
         else:
-            if (a & 2**i) != 0:
-                b += 2**(i-size//2)
-                
+            if (a & 2 ** i) != 0:
+                b += 2 ** (i - size // 2)
+
     if size == 64:
         b = np.uint32(b)
         c = np.uint32(c)
@@ -60,8 +57,9 @@ def split_number(a, size = 32):
     elif size == 16:
         b = np.uint8(b)
         c = np.uint8(c)
-        
+
     return b, c
+
 
 def join_numbers(a, b, final_size=32):
     """
@@ -69,11 +67,11 @@ def join_numbers(a, b, final_size=32):
     Args:
         a:          input1 (Becomes upper bits)
         b:          input2 (Becomes lower bits)
-        final_size: bit size of the returned number 
-        
+        final_size: bit size of the returned number
+
     Returns:
         c:      Joined number
-    """    
+    """
     if final_size == 64:
         a = np.uint32(a)
         b = np.uint32(b)
@@ -89,39 +87,41 @@ def join_numbers(a, b, final_size=32):
         b = np.uint8(b)
         c = (a << 8) + b
         c = np.uint16(c)
-        
+
     return c
 
-def join_8_8bit264bit(a,b,c,d,e,f,g,h):
+
+def join_8_8bit264bit(a, b, c, d, e, f, g, h):
     """
     Join 8 8bit unsigned integer into 64bit unsigned integer.
     Args:
         a,b,c,d,: 8bit unsigned integers
         (a: uuu, b: uul, c: ulu, d: ull, ...)
-        
+
     Returns:
         result: 64 bit unsined integer
     """
-    i = join_numbers(a,b,16)
-    j = join_numbers(c,d,16)
-    k = join_numbers(e,f,16)
-    l = join_numbers(g,h,16)
-    
-    m = join_numbers(i,j,32)
-    n = join_numbers(k,l,32)
-    
-    result = join_numbers(m,n,64)
-    
+    i = join_numbers(a, b, 16)
+    j = join_numbers(c, d, 16)
+    k = join_numbers(e, f, 16)
+    l = join_numbers(g, h, 16)
+
+    m = join_numbers(i, j, 32)
+    n = join_numbers(k, l, 32)
+
+    result = join_numbers(m, n, 64)
+
     return result
 
-def ms2FS_divider(ms:Union[int, float] = 3.0) -> int:
+
+def ms2FS_divider(ms: Union[int, float] = 3.0) -> int:
     """
     Convert duration (ms) of pulse for ramp mode.
     Typical values: 3 ms -> 6661, 20 ms -> 44439
-    
+
     Args:
         ms (float): Duration between each trigger pulse for ramp mode (trigger 1, active when it is off).
-        
+
     Return:
         divider (int)
     """
@@ -129,1303 +129,1701 @@ def ms2FS_divider(ms:Union[int, float] = 3.0) -> int:
         # Make minimum to be about 100 us.
         ms = 220
     elif ms < 10.0:
-        ms = int(ms /3 * 6661)
+        ms = int(ms / 3 * 6661)
     else:
         ms = int(ms / 20 * 44439)
-    
     return ms
+
+
+def get_FS_channel(panel, channel):
+    return panel * 8 + channel
+
+
+def split_FS_channel(number):
+    panel = number // 8
+    channel = number % 8
+    return panel, channel
 
 
 """----------------
 Define classes
-------------------"""    
-class NEEL_DAC_channel(InstrumentChannel):
+------------------"""
+
+
+class NEEL_DAC(Instrument):
+    """
+    This is the qcodes driver for NEEL DAC controlled by National Instruments single board RIO 9612.
+
+    Args:
+        name (str): name of the instrument
+        bitfile(str): path to the bit file
+        address (str): IP address of NI sbrio9612 (can be checked by NI MAX)
+        panels (List[int]): list of DAC value to be used
+        delay_between_steps (int): time delay between DAC movements for DC value in ms
+        min_value (Optional[float]): safety value for minimum voltage for all channels (if None: use -voltage_range)
+        max_value (Optional[float]): safety value for maximum voltage for all channels (if None: use +voltage_range)
+    """
+
+    def __init__(self, name: str,
+                 bitfile: str,
+                 address: str,
+                 panels: List[int],
+                 delay_between_steps: int = 1,
+                 initial_value: Optional[float] = None,
+                 min_value: Optional[float] = None,
+                 max_value: Optional[float] = None,
+                 **kwargs) -> None:
+        super().__init__(name, **kwargs)
+        self.bitfile = bitfile
+        self.address = address
+        self.ref = None  # FPGA reference
+        self.last_retrieved_values = None  # array of panels x channels
+        self.open()
+
+        # Hardware limitations
+        self.max_panels = 8
+        self.max_channels = 8
+        self.bits_resolution = 15  # 2**bits
+        self.voltage_range = 5.0  # +/- value
+        self.min_value = float(min_value) if min_value else -self.voltage_range
+        self.max_value = float(max_value) if max_value else +self.voltage_range
+
+        # Parameters
+        self._panels = panels
+        self._delay_between_steps = delay_between_steps
+
+        self.add_parameter('panels',
+                           label='List of used panels',
+                           get_cmd=self.get_panels,
+                           set_cmd=self.set_panels,
+                           initial_value=panels,
+                           )
+
+        self.add_parameter('delay_between_steps',
+                           label='Wait time of DAC bit movement',
+                           unit='ms',
+                           get_cmd=self.get_delay_between_steps,
+                           set_cmd=self.set_delay_between_steps,
+                           get_parser=int,
+                           set_parser=int,
+                           vals=vals.Ints(0, 5),  # is it correct this limit?
+                           initial_value=delay_between_steps,
+                           )
+
+        self.sequencer = NEEL_DAC_Sequencer(parent=self)
+        self.lockin = NEEL_DAC_LockIn(parent=self)
+        if initial_value is not None:
+            self.move_all_to(initial_value)
+
+    """===================================
+    Communication
+    ==================================="""
+
+    def open(self):
+        """
+        Open FPGA reference and return it.
+        """
+        self.ref = Session(bitfile=self.bitfile, resource='rio://' + self.address + '/RIO0')
+        return self.ref
+
+    def close(self):
+        """
+        Close FPGA reference
+        """
+        self.ref.close()
+
+    def send_Xmit_order(self, order=0):
+        """
+        Main program to send an order to FPGA.
+
+        Arg:
+            order: uint64
+        """
+        order_in = self.ref.registers['order in']
+        order_Xmitted = self.ref.registers['order Xmitted']
+
+        order_in.write(order)
+        order_Xmitted.write(True)
+
+        i = 0
+        while order_Xmitted.read():
+            i += 1
+
+    """===================================
+    Alias for methods
+    ==================================="""
+    # def initialize(self, *args, **kwargs):
+    #     pass
+    #     initialize = init;
+    #
+    # initialise = init;
+    # DAC_init_values = init
+
+    """===================================
+    Movements
+    ==================================="""
+
+    def move(self, wait_until_end: bool = True):
+        """
+        Start DAC movement and optional waiting until the end
+        """
+        self.start()
+        if wait_until_end:
+            self.wait_end_of_move()
+
+    def start(self):
+        """
+        Start DAC movement
+        """
+        order_number = join_8_8bit264bit(1, 2, 0, 0, 0, 0, 0, 0)
+        self.send_Xmit_order(order_number)
+
+    def stop(self):
+        """
+        Stop DAC movement
+        """
+        order_number = join_8_8bit264bit(1, 5, 0, 0, 0, 0, 0, 0)
+        self.send_Xmit_order(order_number)
+
+    def wait_end_of_move(self):
+        """
+        Wait until all the DAC movement finishes.
+        """
+        move_bus_ready = self.ref.registers['move bus ready']
+        i = 0
+        while move_bus_ready.read() == False:
+            i += 1
+
+    def move_all_to(self, value: Union[int, float]):
+        """
+        Move all DAC values in the used value to "value".
+        Hardware problem: sometimes it does not move to the target value
+        Solution: move to value-0.01 and then value to ensure the movement
+        Note: 0.01 is a hardcoded value but it can be different
+        Comment: set all values before move to move in parallel (to be checked)
+        """
+        v = [value - 0.01, value]
+        for vi in v:
+            arr = np.ones((self.max_panels, self.max_panels)) * vi
+            self.set_values(arr)
+
+    def move_to(self, panel: int, channel: int, value: Union[int, float]):
+        """
+        Move a DAC channel to a target value.
+        Hardware problem: sometimes it does not move to the target value
+        Solution: move to value-0.01 and then value to ensure the movement
+        Note: 0.01 is a hardcoded value, but it can be different
+        """
+        v = [value - 0.01, value]
+        for vi in v:
+            self.set_value(panel=panel, channel=channel, value=vi)
+
+    def set_value(self, panel: int, channel: int, value: Union[int, float]):
+        """
+        Change the DAC value of a given panel-channel
+        """
+        self._send_value_order(panel, channel, value)
+        self.move()
+
+    def set_values(self, arr):
+        """
+        arr: array of values with shape (max_panels x max_channels) --> same as get_values()
+        """
+        arr = np.array(arr)
+        shape = (self.max_panels, self.max_panels)
+        if arr.shape != shape:
+            raise ValueError(f'Shape of value array should be {shape}')
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                # Allow parallel movement
+                self._send_value_order(panel=i, channel=j, value=arr[i, j])
+        self.move()
+
+    def _send_value_order(self, panel, channel, value: float):
+        if not self.min_value <= value <= self.max_value:
+            raise ValueError(f'{value} is out of the safety limits ({self.min_value} V, {self.max_value} V)')
+        res = 2 ** self.bits_resolution
+        vrange = self.voltage_range
+        bit_value = np.int16(value / vrange * res) + res
+        a, b = split_number(bit_value, size=16)
+        order_number = join_8_8bit264bit(1, 4, 0, 0, panel, channel, a, b)
+        self.send_Xmit_order(order_number)
+
+    def get_values(self, precision: int = 4, from_buffer: bool = False):
+        if self.last_retrieved_values is None or from_buffer is False:
+            value = self.get_current_values()
+        else:
+            value = self.last_retrieved_values
+        return np.round(value, precision)
+
+    def get_current_values(self):
+        """
+        Get current values of DAC
+        """
+        # TODO: move this block to dac.panel.channel and check if panel or channel is first
+
+        # Get rid of an eventual unfinished retrieving sequence
+        get_value = self.ref.registers['get DAC value']
+        got_value = self.ref.registers['got DAC value']
+        got_value.write(True)
+        while get_value.read():
+            got_value.write(True)
+
+        # Read values
+        retrieve = self.ref.registers['DAC to retrieve']
+        data = self.ref.registers['DAC data']
+
+        max_num = self.max_panels * self.max_channels
+        res = 2 ** self.bits_resolution
+        vrange = self.voltage_range
+        to_real_unit = lambda v: (v - res) / res * vrange
+
+        values = np.zeros((self.max_panels, self.max_channels), dtype=float)
+        for i in range(max_num):
+            retrieve.write(i)
+            got_value.write(True)
+            get_value.write(True)
+            j = 0
+            while got_value.read():
+                j += 1
+            value = data.read()
+            panel_channel, value = split_number(value, size=32)
+            panel = int(panel_channel) // self.max_panels
+            channel = int(panel_channel) % self.max_channels
+
+            value = to_real_unit(value)
+            values[panel, channel] = value
+
+            got_value.write(True)
+        self.last_retrieved_values = values
+        return values
+
+    """===================================
+    get/set for parameters
+    ==================================="""
+
+    def get_panels(self):
+        return self._panels
+
+    def set_panels(self, value: List[int]):
+        # Validate value
+        panels_to_use = [False] * self.max_panels
+        for n in value:
+            if n >= self.max_channels:
+                raise ValueError('Panel{:d} is out of range.'.format(n))
+            else:
+                panels_to_use[n] = True
+
+        # Generate and send Xmit order
+        order_number = self._Xmit_order_panels(panels_to_use)
+        self.send_Xmit_order(order=order_number)
+        self._panels = value
+
+        # Add submodules
+        self.create_panels()
+
+    def create_panels(self):
+        self.submodules = {}
+        for n in self._panels:
+            name = f'p{n}'  # p for panel
+            panel = NEEL_DAC_Panel(parent=self, name=name, panel_number=n)
+            self.add_submodule(name, panel)
+
+    def _Xmit_order_panels(self, value: List[bool]):
+        panel = 0
+        for i, b in enumerate(value):
+            if b:
+                panel += 2 ** i
+        order_number = join_8_8bit264bit(1, 1, 0, 0, 0, 0, 0, panel)
+        return order_number
+
+    def get_delay_between_steps(self):
+        return self._delay_between_steps
+
+    def set_delay_between_steps(self, value: int):
+        self._delay_between_steps = value
+        order_number = self._Xmit_order_delay_between_steps(value)
+        self.send_Xmit_order(order=order_number)
+
+    def _Xmit_order_delay_between_steps(self, value: int):
+        order_number = join_8_8bit264bit(1, 3, 0, 0, 0, 0, 0, value)
+        return order_number
+
+
+class NEEL_DAC_Panel(InstrumentChannel):
+    """
+    This class holds information about a panel containing 8 DAC channels.
+
+    Args:
+        parent (Instrument): NEEL_DAC
+        name (str): name of the panel
+        panel_number (int): panel_number (typically 0 ~ 4, max 7)
+
+    """
+
+    def __init__(self, parent: Instrument, name: str, panel_number: int, **kwargs) -> None:
+        super().__init__(parent, name, **kwargs)
+        self.dac = self._parent
+        self.panel_number = panel_number
+
+        # Add dummy parameter since we get error with snapshot without it.
+        self.add_parameter('dummy',
+                           label='dummy',
+                           get_cmd=self.get_dummy,
+                           get_parser=int,
+                           )
+
+        self.create_channels()
+
+    def create_channels(self):
+        for channel in range(self.dac.max_channels):
+            name = 'c{:d}'.format(channel)  # c stands for channel
+            channel_instance = NEEL_DAC_Channel(self, name, channel)
+            self.add_submodule(name, channel_instance)
+
+    def get_dummy(self):
+        return 0
+
+
+class NEEL_DAC_Channel(InstrumentChannel):
     """
     This class holds information about each DAC channel.
-    
+    JL: I don't like that this is an instrument channel. It can be simply a Parameter class.
+
     Args:
         parent (InstrumentChannel): NEEL_DAC_Panel
         name (str): name of the channel
         channel (int): channel number (0 ~ 7)
         value (float): output value of the DAC.
     """
+
     def __init__(self,
                  parent: InstrumentChannel,
-                 name:str,
-                 channel:int, 
-                 value:float=-0.0003,
-                 vmax:float=5.0,
-                 vmin:float=-5.0,
-                 alias:str=None,
+                 name: str,
+                 channel: int,
+                 value: float = -0.0003,  # JL: weird default value
+                 alias: str = None,
                  **kwargs) -> None:
         super().__init__(parent, name, **kwargs)
         self.dac = self._parent.dac
-        self.panel = self._parent.bus_number
+        self.panel = self._parent.panel_number
         self.channel = channel
-        self.val = value
-        self.alias = alias
-        
+        self.value = value
+        self.alias = alias  # JL: not used?
+        self.last_retrieved_value = None
+
         self.add_parameter('v',
                            label='Value',
                            unit='V',
-                           scale = 1.0,
-                           get_cmd = self.get_value,
-                           set_cmd = self.set_value,
-                           get_parser = float,
-                           set_parser = float,
-                           vals = vals.Numbers(vmin, vmax),
-                          )
-        
+                           scale=1.0,
+                           get_cmd=self.get_value,
+                           set_cmd=self.set_value,
+                           get_parser=float,
+                           set_parser=float,
+                           vals=vals.Numbers(self.dac.min_value, self.dac.max_value),
+                           )
+
     def get_value(self):
-        return self.val
-    
-    def set_value(self, val:float):
-        #print(self.panel,self.channel,value)
+        arr = self.dac.get_values()
+        return arr[self.panel, self.channel]
+
+    def set_value(self, value: float):
         # Set DAC value if it is not np.nan.
-        if not np.isnan(val):
-            self.dac.DAC_set_value(panel_channel={'panel':self.panel, 'channel':self.channel},
-                                   DAC_goto_value=val)
-            #self.dac.move() # HE: let it move when set.
-        self.val = val
-    
-class NEEL_DAC_Bus(InstrumentChannel):
+        if not np.isnan(value):
+            self.dac.move_to(panel=self.panel, channel=self.channel, value=value)
+            # self._send_value_order(value)
+            # self.dac.move(wait_until_end=wait_until_end)
+        # self.value = value
+
+
+class NEEL_DAC_Sequencer(InstrumentChannel):
     """
-    This class holds information about a bus containing 8 DAC channels.
-    
+    This class holds information about fast sequence
+
     Args:
         parent (Instrument): NEEL_DAC
-        name (str): name of the bus
-        bus_number (int): panel_number (typically 0 ~ 4, max 7)
-        
-    """
-    def __init__(self, parent: Instrument, name:str, bus_number:int, **kwargs) -> None:
-        super().__init__(parent, name, **kwargs)
-        self.dac = self._parent
-        self.bus_number = bus_number
+        n_channels (int): number of usable channels for pulse sequence (for old bitfile: 16)
 
-        # Add dummy parameter since we get error with snapshot without it.
-        self.add_parameter('dummy',
-                           label='dummy',
-                           get_cmd = self.get_dummy,
-                           get_parser = int,
-                           )
-        
-        for channel in range(8):
-            s = 'c{:d}'.format(channel)
-            channel_instance = NEEL_DAC_channel(self, s, channel)
-            self.add_submodule(s, channel_instance)
-            
-    def get_dummy(self):
-        return 0
-    
-class NEEL_DAC(Instrument):
+    Comments:
+        [JL] Ramp mode = True --> the time between each order is set to be "sample_time" value (in ms)
+        [JL] Ramp mode = False --> it won't use the sample_time value
+        [JL] Total sequence time = max((sample_count + 1 ) * sample_time, sum(wait))
+        [JL] Do not let the user change sample_count, autoset sample_count instead to avoid problems
+        [JL] I don't find any effect of trigger_length...
     """
-    This is the qcodes driver for NEEL DAC controlled by National Instruments single board RIO 9612.
-    
-    Args:
-        name (str): name of the instrument
-        bitFilePath(str): path to the bit file
-        address (str): IP address of NI sbrio9612 (can be checked by NI MAX)
-        LI_frequency (float): lock-in frequency
-        LI_amplitude (float): lock-in amplitude
-        LI_channel (int): panel = N // 8, channel = N % 8
-        LI_status (bool): status of lock-in (On: True, Off: False)
-        used_buses (List[int]): list of DAC value to be used
-        ms2wait (int): wait time between each DAC bit movement
-        v (dict): dictionary of short-cut-references to NEEL_DAC_CHANNELs via alias-name
-        FS_divider (Union[float, int]): For fast sequence ramp mode it determines time between each DAC step (ms). (trigger from DIO1/panel 9)
-                          For fast sequence mode it determines time of pulse from DIO1/panel 9.
-        FS_ramp (bool): ramp mode (True) or not (False)
-        FS_pulse_len (int): Length of trigger (check minimum trigger length of each instrument, which accept the trigger.)
-        FS_chan_list (List[int]): List of fast sequence channel (up to 16 channels). Pannel = N // 8, channel = N % 8, Dummy = 255
-        FS_status (bool): whether fast sequence is running (True) or not (False).
-        FS_sample_count (int): Length of the fast sequence slot
-        FS_move_limit (List[float, float]): minimum and maximum for the dac movement for fast ramp and sequence.
-        init_zero (bool): (True) initialize all DAC channels to zero or (False) keep the current configuration
-    """
-    def __init__(self, name:str,
-                 bitFilePath:str=bit_file,
-                 address:str=ip_address,
-                 LI_frequency:float=23.3,
-                 LI_amplitude:float=0.0,
-#                  LI_channel:int=0,
-                 LI_channel:list=[1,0], # HE
-                 LI_status:bool=False,
-                 used_buses:List[int]=[1,2,4,6],
-                 ms2wait:int=1,
-                 FS_divider:Union[int, float]=3,
-                 FS_ramp:bool=True,
-                 FS_pulse_len:int=100,
-                 FS_chan_list:List[int]=list(range(16)),
-                 FS_status:bool=False,
-                 FS_sample_count:int=10,
-                 FS_move_limit:List[float]=[-0.5, 0.3],
-                 init_zero:bool=False,
+
+    # [27/09/2022] Calibrated time delays with DAC of Wodan by Junliang
+    delay_move = 16.14  # us
+    delay_wait_offset = 1.26  # us
+    delay_wait_value = 1.05
+    delay_trigger = 0.028  # us
+    delay_jump = 0.488  # us
+
+    ramp_wait_correction = 0.951  # for sample_time > 500 us
+
+    def __init__(self,
+                 parent: Instrument,
+                 n_channels: int = 16,
+                 ramp_mode: bool = False,
+                 sample_time: Union[int, float] = 1,  # ms
+                 trigger_length: int = 100,  # us
                  **kwargs) -> None:
-        super().__init__(name, **kwargs)
-        # Address information
-        self.bitFilePath = bitFilePath
-        self.bitFilePath = bitFilePath
-        self.address =address
-        # Define reference to access FPGA.
-        self.ref = None
-        self.openRef()
-        # lock-in related parameters
-        self._LI_status = LI_status
-        self._LI_frequency = LI_frequency
-        self._LI_amplitude = LI_amplitude
-        self._LI_channel = LI_channel
-        # DAC related parameters
-        self._used_buses = used_buses
-        self._ms2wait = ms2wait
-        self.v = dict()
-        # Fast sequence realted parameters
-        self._FS_divider = FS_divider
-        self._FS_ramp = FS_ramp
-        self._FS_pulse_len = FS_pulse_len
-        self._FS_chan_list = FS_chan_list
-        self._FS_status = FS_status
-        self._FS_sample_count = FS_sample_count
-        self._FS_move_limit = FS_move_limit
-        
-        seq = np.zeros((2,10), dtype=float)
-        seq[:, 0] = [101, 0]
-        seq[:, 9] = [103, 9]
-        self._FS_slots = seq
-        
-        if init_zero:
-            self.initialise()
-        
-        self.add_parameter('LI_status',
-                           label='Lock-in status',
-                           get_cmd=self.get_lock_in_status,
-                           set_cmd=self.set_lock_in_status,
-                           initial_value=LI_status,
-                           )
-        
-        self.add_parameter('LI_frequency',
-                           label='Lock-in frequency',
-                           unit='Hz',
-                           get_cmd=self.get_lock_in_frequency,
-                           set_cmd=self.set_lock_in_frequency,
-                           get_parser=float,
-                           set_parser=float,
-                           post_delay=0.45, # HE: wait after move such that the lock-in-detector can follow
-                           vals=vals.Numbers(0.0, 50000.0),
-                           initial_value=LI_frequency,
-                           )
-        
-        
-        self.add_parameter('LI_amplitude',
-                           label='Lock-in amplitude',
-                           unit='V',
-                           get_cmd=self.get_lock_in_amplitude,
-                           set_cmd=self.set_lock_in_amplitude,
-                           get_parser=float,
-                           set_parser=float,
-                           post_delay=0.45, # HE: wait after move such that the lock-in-detector can follow
-                           vals=vals.Numbers(0.0, 2.0),
-                           initial_value=LI_amplitude,
-                           )      
+        super().__init__(parent, 'sequence', **kwargs)
+        self.dac = self._parent
+        self.n_channels = int(n_channels)
+        self.default_orders_ref = {
+            # 'end': 100,  # DEPRECATED
+            'trigger': 101,  # DEPRECATED
+            'wait': 102,  # DEPRECATED
+            'jump': 103,  # DEPRECATED
+            'dummy': 255,  # DEPRECATED
+        }
+        # Add default references 0-15
+        for i in range(self.n_channels):
+            self.default_orders_ref[i] = i
+        self.valid_raw_orders = tuple(list((self.default_orders_ref.values())))
+        self.orders_ref = dict(self.default_orders_ref)
 
-#         self.add_parameter('LI_channel',
-#                            label='Lock-in channel',
-#                            get_cmd=self.get_lock_in_channel,
-#                            set_cmd=self.set_lock_in_channel,
-#                            get_parser=int,
-#                            set_parser=int,
-#                            vals=vals.Ints(0, 63),
-#                            initial_value=LI_channel,
-#                            ) 
+        # Slots
+        self.slots = OrderedDict()  # parameter for each slot
+        self.used_channels = []
+        self._raw_orders = []
+        self._raw_values = []
+        self.orders = []  # user-friendly order-value list
+        self.max_slots = 4096  # hardcoded from old driver
 
-        self.add_parameter('LI_channel', # HE
-                           label='Lock-in channel',
-                           get_cmd=self.get_lock_in_channel,
-                           set_cmd=self.set_lock_in_channel,
-                           get_parser=list,
-                           set_parser=list,
-                           vals=vals.Lists(vals.Ints(0,7)),
-                           initial_value=LI_channel,
-                           ) 
-        
-        self.add_parameter('value',
-                           label='Used DAC value',
-                           get_cmd=self.get_used_buses,
-                           set_cmd=self.set_used_buses,
-                           initial_value=used_buses,
+        self.n_loop = 1
+        self.default_flags = {
+            'start': 0,
+            'end_presequence': 0,
+            'end_sequence': 1,
+        }
+        self.flags = dict(self.default_flags)
+
+        # Parameters
+        self._status = False
+        self._sample_time = sample_time  # ms
+        self._sample_count = 3
+        self._trigger_length = trigger_length  # us
+        self._ramp_mode = ramp_mode
+
+        self.add_parameter('status',
+                           label='Fast sequence status',
+                           get_cmd=self.get_status,
+                           set_cmd=self.set_status,
+                           get_parser=bool,
+                           set_parser=bool,
+                           initial_value=self._status,
                            )
-        
-        self.add_parameter('ms2wait',
-                           label='Wait time of DAC bit movement',
-                           unit = 'ms',
-                           get_cmd=self.get_ms2wait,
-                           set_cmd=self.set_ms2wait,
-                           get_parser=int,
-                           set_parser=int,
-                           vals=vals.Ints(0,5),
-                           initial_value=ms2wait,
-                           )
-        
-        self.add_parameter('FS_divider',
-                           label='Fast sequence divider',
-                           unit = 'ms',
-                           get_cmd = self.get_FS_divider,
-                           set_cmd = self.set_FS_divider,
+
+        # JL: divider is not the best name --> sample_time
+        self.add_parameter('sample_time',
+                           label='Time between each sample count',
+                           unit='ms',
+                           get_cmd=self.get_sample_time,
+                           set_cmd=self.set_sample_time,
                            get_parser=float,
                            set_parser=float,
                            vals=vals.Numbers(4.6e-4, 450),
-                           initial_value=FS_divider,
+                           initial_value=self._sample_time,
                            )
-        
-        self.add_parameter('FS_ramp',
-                           label='Fast sequence ramp mode',
-                           get_cmd = self.get_FS_ramp,
-                           set_cmd = self.set_FS_ramp,
-                           get_parser = bool,
-                           set_parser = bool,
-                           initial_value=FS_ramp,
-                           )
-        
-        self.add_parameter('FS_pulse_len',
-                           label='Fast sequence pulse length',
-                           get_cmd = self.get_FS_pulse_len,
-                           set_cmd = self.set_FS_pulse_len,
-                           get_parser = int,
-                           set_parser = int,
-                           vals=vals.Ints(100, 10000),
-                           initial_value=FS_pulse_len,
-                           )
-        
-        self.add_parameter('FS_chan_list',
-                           label='Fast sequence channel list',
-                           get_cmd = self.get_FS_chan_list,
-                           set_cmd = self.set_FS_chan_list,
-                           initial_value=FS_chan_list,
-                           )
-        
-        self.add_parameter('FS_status',
-                           label='Fast sequence status',
-                           get_cmd = self.get_FS_status,
-                           set_cmd = self.set_FS_status,
+
+        # JL: ramp_mode is not the best name
+        # Ramp mode means sequential execution of orders with "divider" time in between
+        self.add_parameter('ramp_mode',
+                           label='Use ramp mode?',
+                           get_cmd=self.get_ramp_mode,
+                           set_cmd=self.set_ramp_mode,
                            get_parser=bool,
                            set_parser=bool,
-                           initial_value=FS_status,
+                           initial_value=self._ramp_mode,
                            )
-        
-        self.add_parameter('FS_sample_count',
+
+        self.add_parameter('sample_count',
                            label='Fast sequence sample count',
-                           get_cmd = self.get_FS_sample_count,
-                           set_cmd = self.set_FS_sample_count,
+                           get_cmd=self.get_sample_count,
+                           set_cmd=self.set_sample_count,
                            get_parser=int,
                            set_parser=int,
-                           vals=vals.Ints(1, 100000),
-                           initial_value=FS_sample_count,
+                           vals=vals.Ints(-1, 4096),  # 4096 Hardware limitation? -1 is for testing
+                           initial_value=self._sample_count,
                            )
-        
-        self.add_parameter('FS_move_limit',
-                           label='Fast sequence DAC move limit',
-                           unit = 'V',
-                           get_cmd = self.get_FS_move_limit,
-                           set_cmd = self.set_FS_move_limit,
-                           initial_value=FS_move_limit,
-                           )
-        
-        self.add_parameter('FS_slots',
-                           label = 'Fast sequence slots',
-                           get_cmd = self.get_FS_slots,
-                           set_cmd = self.set_FS_slots,
-                           snapshot_get = False,
-                           snapshot_value = False,
-                           )
-        
-        # Initialize used value
-        self.set_used_buses(used_buses)
-        self.set_ms2wait(ms2wait)
-        # Define Buses
-        for n in self._used_buses:
-            if 0 <= n <=7:
-                s = 'p{:d}'.format(n)
-                bus = NEEL_DAC_Bus(self, s, n)
-                self.add_submodule(s, bus)        
-    
-    def get_lock_in_status(self):
-        return self._LI_status
-    
-    def set_lock_in_status(self, val: bool):
-        self._LI_status = val
-        self.lock_in_send_order(order=3,
-                                inhibate = not val)
-    
-    def get_lock_in_frequency(self):
-        return self._LI_frequency
-    
-    def set_lock_in_frequency(self, val: float):
-        self._LI_frequency = val
-        if self._LI_status:
-            # If lock-in is running, once stop it and restart after change.
-            self.set_lock_in_status(False)
-            self.lock_in_send_order(order=0,
-                                    frequency = val)
-            self.set_lock_in_status(True)
-        else:
-            self.lock_in_send_order(order=0,
-                                    frequency = val)
-    
-    def get_lock_in_amplitude(self):
-        return self._LI_amplitude
-    
-    def set_lock_in_amplitude(self, val: float):
-        self._LI_amplitude = np.abs(val)
-        if self._LI_status:
-            # If lock-in is running, once stop it and restart after change.
-            self.set_lock_in_status(False)
-            self.lock_in_send_order(order=2,
-                                    amplitude = val)
-            self.set_lock_in_status(True)
-        else:
-            self.lock_in_send_order(order=2,
-                                    amplitude = val)
-        
-    def get_lock_in_channel(self):
-        return self._LI_channel
-    
-#     def set_lock_in_channel(self, value: int):
-#         self._LI_channel = value
-#         panel = value // 8
-#         channel = value % 8
-#         LI_panel_channel = {'panel':panel, 'channel':channel}
-#         if self._LI_status:
-#             # If lock-in is running, once stop it and restart after change.
-#             self.set_lock_in_status(False)
-#             self.lock_in_send_order(order=1, panel_channel=LI_panel_channel)
-#             self.set_lock_in_status(True)
-#         else:
-#             self.lock_in_send_order(order=1, panel_channel=LI_panel_channel)
-    
-    
-    def set_lock_in_channel(self, val: int): #HE
-        panel = val[0]
-        channel = val[1]
-        LI_panel_channel = {'panel':panel, 'channel':channel}
-        if self._LI_status:
-            # If lock-in is running, once stop it and restart after change.
-            self.set_lock_in_status(False)
-            self.lock_in_send_order(order=1, panel_channel=LI_panel_channel)
-            self.set_lock_in_status(True)
-        else:
-            self.lock_in_send_order(order=1, panel_channel=LI_panel_channel)
-    
-    def get_used_buses(self):
-        return self._used_buses
-    
-    def set_used_buses(self, val: List[int]):
-        self._used_buses = val
-        
-        busses_to_use = [False]*8
-        for n in val:
-            if n > 7:
-                print('Bus{:d} is out of range.'.format(n))
-            else:
-                busses_to_use[n] = True
-            
-        self.DAC_send_order(order=1,
-                            busses_to_use=busses_to_use)
-        
-    def get_ms2wait(self):
-        return self._ms2wait
-    
-    def set_ms2wait(self, val: int):
-        self._ms2wait = val
-        self.DAC_send_order(order=2,
-                            delay_between_steps_ms = val)
-        
-    def get_FS_divider(self):
-        return self._FS_divider
-    
-    def set_FS_divider(self, val: Union[int, float]):
-        if self._FS_status:
-            # stop fast sequence if running.
-            self.set_FS_status(False)
-            
-        self._FS_divider = val
-        self.fastseq_set_orders(order = 1,
-                                divider = ms2FS_divider(val))
-        
-    def get_FS_ramp(self):
-        return self._FS_ramp
-    
-    def set_FS_ramp(self, val: bool):
-        if self._FS_status:
-            # stop fast sequence if running.
-            self.set_FS_status(False)
-            
-        self._FS_ramp = val
-        if val:
-            # When ramp mode, unset stop count.
-            self.fastseq_set_orders(order=3)
-        else:
-            # When fast cycle mode ('start'), unset ramp.
-            self.fastseq_set_orders(order=2)
-        
-    def get_FS_pulse_len(self):
-        return self._FS_pulse_len
-    
-    def set_FS_pulse_len(self, val:int):
-        if self._FS_status:
-            # stop fast sequence if running.
-            self.set_FS_status(False)
-        self._FS_pulse_len = val
-        self.fastseq_set_orders(order=4,
-                                pulse_length=val)
-        
-    def get_FS_chan_list(self):
-        return self._FS_chan_list
-    
-    def set_FS_chan_list(self, val:List[int]):
-        if self._FS_status:
-            # stop fast sequence if running.
-            self.set_FS_status(False)
-            
-        self._FS_chan_list = val
-        size = len(val)
-#         for i in range(16):
-        for i in range(32): # HE 32
-            if i < size:
-                v = val[i]
-                if 0 <= v < 64:
-                    panel = v // 8
-                    channel = v % 8
-                    self.fastseq_set_fastChannel(fast_chan_number=i,
-                                                 panel_channel={'panel':panel, 'channel':channel},
-                                                 is_dummy = False)
-                else:
-                    # set dummy
-                    self.fastseq_set_fastChannel(fast_chan_number=i,
-                                                 panel_channel={'panel':0, 'channel':0},
-                                                 is_dummy = True)
-                    
-            else:
-                self.fastseq_set_fastChannel(fast_chan_number=i,
-                                             panel_channel={'panel':0, 'channel':0},
-                                             is_dummy = True)
-                
-    def get_FS_status(self):
-        return self._FS_status
-    
-    def set_FS_status(self, val:bool, sample_count=True):
-        # Control start and stop of fast sequence.
-        # When we start the fast sequence, each time we have to set sample count.
-        # Therefore I include it from the beggining.
-        if val:
-            if sample_count:
-                # Set sample count.
-                self.FS_sample_count(self.FS_sample_count())
-            # Start fast sequence
-            self.fastseq_set_orders(order=6)
-        else:
-            # Stop fast sequence
-            self.fastseq_set_orders(order=0)
-        self._FS_status = val
-            
-    def get_FS_sample_count(self):
-        return self._FS_sample_count
-    
-    def set_FS_sample_count(self, val:int):
-        if self._FS_status:
-            # stop fast sequence if running.
-            self.set_FS_status(False)
-            
-        self._FS_sample_count = val
-        if self._FS_ramp:
-            # Ramp mode
-            #- For ramp mode we add trigger count +2 (make sure that ADC obtain enough amount of trigger pulse.)
-            self.fastseq_set_orders(order=5,
-                                    sample_count=val+2)
-        else:
-            # Fast cycle mode
-            self.DAC_set_stop_sample_count(sample_count = val)
-            
-    def get_FS_move_limit(self):
-        return self._FS_move_limit
-    
-    def set_FS_move_limit(self, val:List[float]):
-        self._FS_move_limit = val
-            
-    def get_FS_slots(self):
-        return self._FS_slots
-    
-    def set_FS_slots(self, val:np.ndarray, store_seq2meta=True):
-        shape = val.shape
-        # Check shape of the input variable
-        if (not len(shape) == 2) or (not shape[0]==2):
-            raise ValueError('Shape of fast sequence array is invalid.')
-        
-        self.fast_seq_set_slots(val)
-        
-        if store_seq2meta:
-            self.FS_slots.metadata['fast_seq'] = [list(val[0,:]), list(val[1,:])]
-        
-        self._FS_slots = val
-            
-    def get_DAC_values(self, mode:int=1, fill_modules:bool = False):
-        """
-        Get all the DAC values from FPGA.
-        
-        Args:
-            mode (int): 0: returns 8 by 8 array,
-                        1: returns information only for used value
-            fill_modules (bool): whether we set obtained values to sub-modules or not
-                                It is useful when we first define the instrument.
-        """
-        dac_values = self.DAC_current_values()
-        
-        if mode==1:
-            a = np.zeros((len(self._used_buses), 8), dtype=float)
-            for i, n in enumerate(self._used_buses):
-                a[i,:] = dac_values[n,:]
-            dac_values = a
-            
-        # Set values to submodules
-        if fill_modules:
-            for n in self._used_buses:
-                panel = getattr(self, 'p{:d}'.format(n))
-                for c in range(8):
-                    ch = getattr(panel, 'c{:d}'.format(c))
-                    ch.v(dac_values[n,c])
-            
-        return dac_values
-    
-    
-    """-----------------------
-    Control functions
-    ------------------------"""
-    def DAC_start_movement(self):
-        """
-        Start DAC movement
-        """
-        self.DAC_send_order(order=0)
-        
-    def init(self, value:float=0.0):
-        """
-        Initialize all the DAC values in the used value to "value".
-        
-        For the procedure once move all the DAC to value-0.1 V and come back
-        to the given "value".
-        """
-        self.move_all_to(value-0.01) #jl
-        self.move_all_to(value)
-        
-    initialize=init; initialise=init; DAC_init_values=init
-  
-    """===================================
-    FPGA control functions from LabVIEW
-    ==================================="""
-    def openRef(self):
-        # Open FPGA reference and return it.
-        self.ref = Session(bitfile=self.bitFilePath, resource='rio://'+self.address+'/RIO0')
-        # if not (self.ref.fpga_vi_state==nifpga.FpgaViState.Running):
-        #     # If not run, run.
-        #     self.ref.run()
-        # perform lock-in-configure
-        self.lock_in_configure_analysis()
-        
-    def close(self):
-        # Close FPGA reference
-        self.ref.close()
-        
-    """---------------------
-    Lock-in related functions
-    ------------------------"""
-    def lock_in_configure_analysis(self):
-        """
-        Function to setup FPGA at the beggining.
-        """
-        # Data set to host
-        self.lock_in_send_analysis(order = {'NULL':0, 'Data_sent_to_host':1, 'dt/tau':2, 'Voltage_range':3}['Data_sent_to_host'],
-                                  voltage_range = {'10V':0, '5V':1, '1V':2}['10V'],
-                                  dt_over_tau = 0.0,
-                                  data_sent_back = {'LI':0, 'average':1}['average'],
-                                  )
-        # dt/tau
-        self.lock_in_send_analysis(order = {'NULL':0, 'Data_sent_to_host':1, 'dt/tau':2, 'Voltage_range':3}['dt/tau'],
-                                  voltage_range = {'10V':0, '5V':1, '1V':2}['10V'],
-                                  dt_over_tau = 8.00006091594696044921875000000000E-6,
-                                  data_sent_back = {'LI':0, 'average':1}['average'],
-                                  )
-    
-    def lock_in_send_analysis(self,
-                              order = {'NULL':0, 'Data_sent_to_host':1, 'dt/tau':2, 'Voltage_range':3}['Data_sent_to_host'],
-                              voltage_range = {'10V':0, '5V':1, '1V':2}['10V'],
-                              dt_over_tau = 0.0,
-                              data_sent_back = {'LI':0, 'average':1}['average'],
-                              ):
-        """
-        Function to perform initial setup of FPGA.
-        
-        Args:
-            order (int): selection of operation
-            votage_range (int): voltage range
-            dt_over_tau (float): ??
-            data_sent_back (int): ??
-        """
-        # 1st frame of LabVIEW program
-        if order == 0:
-            # NULL
-            order_number = join_8_8bit264bit(3,0,0,0,0,0,0,0)
-        elif order == 1:
-            # Data set to host
-            order_number = join_8_8bit264bit(3,1,0,0,0,0,0,data_sent_back)
-        elif order == 2:
-            # dt/tau
-            dt_over_tau = dt_over_tau * (2**32)         # Convert Fixed point to 32 bit integer
-            order_number = join_numbers(3,2,16)
-            order_number = join_numbers(order_number, 0, 32)
-            order_number = join_numbers(order_number, dt_over_tau, 64)
-        elif order == 3:
-            # Voltage range
-            order_number = join_8_8bit264bit(3,3,0,0,0,0,0,voltage_range)
-       
-        # 2nd frame of LabVIEW program
-        order_in = self.ref.registers['order in']
-        order_in.write(np.uint64(order_number))
-        orderXmitted = self.ref.registers['order Xmitted']
-        orderXmitted.write(True)
-        
-        # 3rd frame of LabVIEW program
-        time.sleep(0.01)
-        orderXmitted.write(False)
-        
-        # 4th frame of LabVIEW program
-        if order == 2:
-            # dt/tau
-            # Wait until move bus gets ready.
-            move_bus_ready = self.ref.registers['move bus ready'].read()
-            while move_bus_ready == False:
-                move_bus_ready = self.ref.registers['move bus ready'].read()
-                
-    def lock_in_send_order(self,
-                           order = {'frequency':0, 'channel':1, 'amplitude':2, 'inhibate':3}['inhibate'],
-                           frequency = 0.0,
-                           amplitude = 0.0,
-                           inhibate = False,
-                           panel_channel = {'panel':0, 'channel':0},
-                           ):
-        """
-        Send order to lock-in sub-system.
-        """
-        if order == 0:
-            # Frequency (Hz)
-            f = 25000/frequency
-            if f < 1:
-                f = 1
-            elif f > 4e9:
-                f = 4e9
-            f = np.uint32(f)
-            a,b = split_number(f, size=32)
-            c,d = split_number(a, size=16)
-            e,f = split_number(b, size=16)
-            order_number = join_8_8bit264bit(2,4,0,0,c,d,e,f)
-        elif order == 1:
-            # channel
-            order_number = join_8_8bit264bit(2,1,0,0,0,0,panel_channel['panel'],panel_channel['channel'])
-        elif order == 2:
-            # Amplitude
-            if amplitude < -5:
-                amplitude = -5
-            elif amplitude > 5:
-                amplitude = 5
-#            a = amplitude/5.0*(2**16)
-            a = amplitude/10.0*(2**16)
-            a = np.uint16(a)
-            b,c = split_number(a, 16)
-            
-            order_number = join_8_8bit264bit(2,2,0,0,0,0,b,c)
-        elif order == 3:
-            # Inhibate
-            if inhibate:
-                v = 1
-            else:
-                v = 0
-            order_number = join_8_8bit264bit(2,3,0,0,0,0,0,v)
-        self.DAC_Xmit_order(order = order_number)
-        
-    def DAC_lock_in_init(self,
-                         frequency = 0.0,
-                         amplitude = 0.0,
-                         inhibate = True,
-                         panel_channel = {'panel':0, 'channel':0},
-                         ):
-        """
-        Initialize lock-in
-        """
-        # Stop lock-in before changing the setup.
-        self.lock_in_send_order(order = {'frequency':0, 'channel':1, 'amplitude':2, 'inhibate':3}['inhibate'],
-                               frequency = frequency,
-                               amplitude = amplitude,
-                               inhibate = True,
-                               panel_channel = panel_channel,
-                               )
-        # Set panel and channel
-        self.lock_in_send_order(order = {'frequency':0, 'channel':1, 'amplitude':2, 'inhibate':3}['channel'],
-                               frequency = frequency,
-                               amplitude = amplitude,
-                               inhibate = inhibate,
-                               panel_channel = panel_channel,
-                               )
-        # Set frequency
-        self.lock_in_send_order(order = {'frequency':0, 'channel':1, 'amplitude':2, 'inhibate':3}['frequency'],
-                               frequency = frequency,
-                               amplitude = amplitude,
-                               inhibate = inhibate,
-                               panel_channel = panel_channel,
-                               )
-        # Set amplitude
-        self.lock_in_send_order(order = {'frequency':0, 'channel':1, 'amplitude':2, 'inhibate':3}['amplitude'],
-                               frequency = frequency,
-                               amplitude = amplitude,
-                               inhibate = inhibate,
-                               panel_channel = panel_channel,
-                               )
-        # Start or not
-        self.lock_in_send_order(order = {'frequency':0, 'channel':1, 'amplitude':2, 'inhibate':3}['inhibate'],
-                               frequency = frequency,
-                               amplitude = amplitude,
-                               inhibate = inhibate,
-                               panel_channel = panel_channel,
-                               )
-                
-    """===================
-    DAC related functions
-    ==================="""
-    def DAC_set_use_buses(self,
-                          busses_to_use = [False]*8,
-                          delay_between_steps_ms = 2,
-                          ):
-        if True in busses_to_use:
-            # Buses to use
-            self.DAC_send_order(order = {'start movement':0, 'busses to use':1, 'delay':2, 'value':3, 'stop':4}['busses to use'],
-                              busses_to_use = busses_to_use,
-                              panel_channel = {'panel':0, 'channel':0},
-                              DAC_goto_value = 0.0,
-                              delay_between_steps_ms = delay_between_steps_ms,
-                              )
-            # delay between each DAC movement
-            self.DAC_send_order(order = {'start movement':0, 'busses to use':1, 'delay':2, 'value':3, 'stop':4}['delay'],
-                              busses_to_use = busses_to_use,
-                              panel_channel = {'panel':0, 'channel':0},
-                              DAC_goto_value = 0.0,
-                              delay_between_steps_ms = delay_between_steps_ms,
-                              )
-    
-    def DAC_send_order(self,
-                      order = {'start movement':0, 'busses to use':1, 'delay':2, 'value':3, 'stop':4}['busses to use'],
-                      busses_to_use = [False]*8,
-                      panel_channel = {'panel':0, 'channel':0},
-                      DAC_goto_value = 0.0,
-                      delay_between_steps_ms = 2,
-                       ):
-        """
-        This function is used to send an order to DAC.
-        
-        Security for DAC go to value will be implemented at different location.
-        """
-        if order == 0:
-            # Start movement
-            order_number = join_8_8bit264bit(1,2,0,0,0,0,0,0)
-        elif order == 1:
-            # value to use
-            bus = 0
-            for i, b in enumerate(busses_to_use):
-                if b:
-                    bus += 2**i
-            order_number = join_8_8bit264bit(1,1,0,0,0,0,0,bus)
-        elif order == 2:
-            # delay
-            order_number = join_8_8bit264bit(1,3,0,0,0,0,0,delay_between_steps_ms)
-        elif order == 3:
-            # value
-            value = np.int16(DAC_goto_value/5.0*32768) + 32768
-            a,b = split_number(value, size=16)
-            order_number = join_8_8bit264bit(1,4,0,0,panel_channel['panel'],panel_channel['channel'],a,b)
-        elif order == 4:
-            # stop
-            order_number = join_8_8bit264bit(1,5,0,0,0,0,0,0)
-            
-        self.DAC_Xmit_order(order=order_number)
-    
-    def DAC_Xmit_order(self,
-                       order=0):
-        """
-        Main program to send an order to FPGA.
-        
-        Arg:
-            order: uint64
-        """
-        order_in = self.ref.registers['order in']
-        order_Xmitted = self.ref.registers['order Xmitted']
-        
-        order_in.write(order)
-        order_Xmitted.write(True)
-        
-        i=0
-        while order_Xmitted.read()==True:
-           i+=1
-           
-    def DAC_set_value(self,
-                      panel_channel = {'panel':0, 'channel':0},
-                      DAC_goto_value = 0.0,
-                      ):
-        """
-        Set goto value of DAC.
-        
-        Note:
-            Meanwhile I do not implement safety check here since for QuCoDeS there is another safety chaeck.
-        """
-        self.DAC_send_order(order = {'start movement':0, 'busses to use':1, 'delay':2, 'value':3, 'stop':4}['value'],
-                          busses_to_use = [False]*8,
-                          panel_channel = panel_channel,
-                          DAC_goto_value = DAC_goto_value,
-                          delay_between_steps_ms = 2,
-                           )
-        
-    def DAC_wait_end_of_move(self):
-        """
-        Wait until all the DAC movement finishes.
-        """
-        move_bus_ready = self.ref.registers['move bus ready']
-        i=0
-        while move_bus_ready.read()==False:
-            i += 1
-            
-    def move(self):
-        self.DAC_start_movement()
-        self.DAC_wait_end_of_move()
-        
-    DAC_move=move
-        
-    def move_all_to(self, value:float=0.0):
-        """
-        Move all DAC values in the used value to "value".
-        """
-        for i in self._used_buses:
-            for j in range(8):
-                self.DAC_set_value(panel_channel={'panel':i, 'channel':j},
-                                   DAC_goto_value=value)
-        self.move()
-            
-    def DAC_current_values(self,precision=4):
-        """
-        Get current values of DAC
-        """
-        # Get rid of an eventual unfinished retrieving sequence
-        get_DAC_value = self.ref.registers['get DAC value']
-        got_DAC_value = self.ref.registers['got DAC value']
-        got_DAC_value.write(True)
-        while get_DAC_value.read()==True:
-            got_DAC_value.write(True)
-            
-        # Read values
-        values = np.zeros((8,8),dtype=float)
-        DAC_to_retrieve = self.ref.registers['DAC to retrieve']
-        DAC_data = self.ref.registers['DAC data']
-        for i in range(64):
-            DAC_to_retrieve.write(i)
-            got_DAC_value.write(True)
-            get_DAC_value.write(True)
-            j=0
-            while got_DAC_value.read()==True:
-               j+=1
-            data = DAC_data.read()
-            panel_channel, value = split_number(data, size=32)
-            panel = int(panel_channel)//8
-            channel = int(panel_channel) % 8
-            
-            value = (value - 32768)/32768*5.0 # Convert to real unit
-            values[panel, channel] = value
-            
-            #print(panel,channel,value)
-            
-            got_DAC_value.write(True)
-        return np.round(values,precision)
 
-    values = get_DAC_values
-    
-    """========================================
-    Fast sequence related functions
-    ========================================"""
-    def fastseq_set_orders(self,
-                           order={'stop':0, 'set divider':1, 'unset ramp mode':2, 'unset stop count':3, 'set pulse length':4, 'set ramp':5, 'start':6}['stop'],
-                           divider = 6661,
-                           pulse_length=0,
-                           sample_count = 0,
-                           ):
-        """
-        Program to send an order to fast sequence sub-system.
-        """
-        if order == 0:
-            # stop
-            order_number = join_8_8bit264bit(5,1,0,0,0,0,0,0)
-        elif order == 1:
-            # set divider
-            order_number = join_numbers(5,7, final_size=16)
-            order_number = join_numbers(order_number, 0, final_size=32)
-            order_number = join_numbers(order_number, divider, final_size=64)
-        elif order == 2:
-            # unset ramp mode
-            order_number = join_8_8bit264bit(6,9,0,0,0,0,0,0)
-        elif order == 3:
-            # unset stop count
-            order_number = join_8_8bit264bit(5,6,0,0,0,0,0,0)
-        elif order == 4:
-            # set pulse length
-            order_number = join_numbers(5, 10, final_size=16)
-            order_number = join_numbers(order_number, 0, final_size=32)
-            pulse_length = join_numbers(0, pulse_length, final_size=32)
-            order_number = join_numbers(order_number, pulse_length, final_size=64)
-        elif order == 5:
-            # set ramp
-            order_number = join_numbers(5, 8, final_size=16)
-            order_number = join_numbers(order_number, 0, final_size=32)
-            sample_count = join_numbers(0, sample_count, final_size=32)
-            order_number = join_numbers(order_number, sample_count, final_size=64)
-        elif order == 6:
-            # start
-            order_number = join_8_8bit264bit(5,2,0,0,0,0,0,0)
-            
-        self.DAC_Xmit_order(order = order_number)
-        
-#     def fastseq_set_fastChannel(self,
-#                                 fast_chan_number=0,
-#                                 panel_channel = {'panel':0, 'channel':0},
-#                                 is_dummy = False,
-#                                 ):
-#         """
-#         Allocate DAC panel_channel to fast sequence channels (up to 16 DACs).
-#         """
-#         panel = panel_channel['panel']
-#         if is_dummy:
-#             # Dummy channel is 255.
-#             channel = 255
-#         else:
-#             channel = panel_channel['channel']
-#         # Check whether fast_chan_number is out of range or not.
-#         if fast_chan_number < 0:
-#             fast_chan_number = 0
-#             print('fast channel number is out of range and cast to closest available value.')
-#         elif fast_chan_number > 15:
-#             fast_chan_number = 15
-#             print('fast channel number is out of range and cast to closest available value.')
-            
-#         order_number = join_8_8bit264bit(5,3,0,0,fast_chan_number,0,panel,channel)
-        
-#         self.DAC_Xmit_order(order = order_number)
+        self.add_parameter('trigger_length',
+                           label='Trigger pulse length',
+                           unit='us',
+                           get_cmd=self.get_trigger_length,
+                           set_cmd=self.set_trigger_length,
+                           get_parser=int,
+                           set_parser=int,
+                           vals=vals.Ints(100, 10000),
+                           initial_value=self._trigger_length,
+                           )
 
-    def fastseq_set_fastChannel(self,
-                                fast_chan_number=0,
-                                panel_channel = {'panel':0, 'channel':0},
-                                is_dummy = False,
-                                ):
+        self.reset()
+
+    """
+    reset/start/stop sequence
+    """
+
+    def reset(self):
+        self.stop()
+        self.set_sample_count(1)
+        self._reset_orders()
+        self._reset_channels()
+        self.n_loop = 1
+        self.flags = dict(self.default_flags)
+        self.add_slot_init()
+
+    def _reset_orders(self):
+        self.slots = OrderedDict()
+        self.orders_ref = dict(self.default_orders_ref)
+        self._raw_orders = []
+        self._raw_values = []
+        self.orders = []
+
+    def _reset_channels(self):
+        for index in range(self.n_channels):
+            self.set_sequence_channel(index, is_dummy=True)
+        self.used_channels = []
+
+    def stop(self):
         """
-        Allocate DAC panel_channel to fast sequence channels (up to 32 DACs). # HE 32
+        Stop fast sequence if running.
         """
-        panel = panel_channel['panel']
+        self.status(False)
+
+    def start(self):
+        """
+        Trigger the start of the pulse sequence.
+        It verifies and corrects the orders prior execution.
+        - Find if there is at least one "jump" order. If not, add it.
+        - Correct jump value depending on the number of loops.
+        - Set sample_count according to the number of sequence repetitions
+        """
+        self.correct_sequence()
+        self._update_sample_count()
+        self._start()
+
+    def correct_sequence(self):
+        # Find jump order
+        has_jump_slot, slot_index, jump_param = self._find_first_jump_order()
+        if not has_jump_slot:
+            jump_param = self.add_slot_end()
+            last_index = self.get_last_slot_index()
+        else:
+            self._remove_slots_after_index(slot_index)
+            jump_value = jump_param()
+            last_index = self.get_last_slot_index()
+            if jump_value != last_index:
+                self.flags['end_presequence'] = jump_value
+
+        # update end_sequence flag
+        self.flags['end_sequence'] = last_index + 1
+
+        # Update jump value for loop
+        if self.n_loop == 1:
+            jump_param(last_index)
+        else:
+            jump_param(self.flags['end_presequence'])
+
+    def _find_first_jump_order(self):
+        try:
+            slot_index = next(i for i, info in enumerate(self.orders) if info[0] == 'jump')
+            jump_param = self.get_slot_param_by_index(slot_index)
+            has_jump_slot = True
+        except:
+            has_jump_slot = False
+            slot_index, jump_param = None, None
+        return has_jump_slot, slot_index, jump_param
+
+    def _remove_slots_after_index(self, idx):
+        idx = idx + 1  # keep slot at idx; remove from next one
+        self.orders = self.orders[:idx]
+        self._raw_orders = self._raw_orders[:idx]
+        self._raw_values = self._raw_values[:idx]
+        slots = OrderedDict()
+        for i, (key, value) in enumerate(self.slots.items()):
+            if i == idx:
+                break
+            slots[key] = value
+        self.slots = slots
+
+    def _update_sample_count(self):
+        ramp = self.ramp_mode()
+        if ramp:
+            sc = self._calculate_sample_count_ramp()
+        else:
+            sc = self._calculate_sample_count()
+        self.sample_count(sc)
+
+    def _start(self):
+        """
+        Start fast sequence
+        """
+        self.status(True)
+
+    @property
+    def presequence_orders(self):
+        idx = self.flags['end_presequence']
+        return self.orders[:idx]
+
+    @property
+    def sequence_orders(self):
+        idx1 = self.flags['end_presequence']
+        idx2 = self.flags['end_sequence']
+        return self.orders[idx1:idx2]
+
+    """
+    Calculate timing for parallel execution (ramp_mode = False)
+    """
+
+    def _calculate_sample_count_ramp(self):
+        preseq_sc = self._orders_ramp_sample_count(self.presequence_orders)
+        single_seq_sc = self._orders_ramp_sample_count(self.sequence_orders)
+        total_sc = preseq_sc + single_seq_sc * self.n_loop
+        return total_sc
+
+    def _orders_ramp_sample_count(self, orders):
+        """
+        Args:
+            orders: list of order and value. For example: [['wait', 1], ['jump',0], ...]
+
+        Returns: sample count for ramp mode
+
+        """
+        waits = []
+        moves = []
+        for info in orders:
+            order, value = info
+            if order == 'wait':
+                waits.append(value)
+            elif order not in ['jump', 'trigger']:
+                moves.append(value)
+
+        st = self.sample_time()
+        fact = st * self.ramp_wait_correction
+        sc_wait = sum([vi // fact for vi in waits])
+        sc_move = len(moves)
+        sc = int(sc_wait + sc_move)
+        return sc
+
+    """
+    Calculate sample count for parallel execution (ramp_mode = False)
+    """
+
+    def _calculate_sample_count(self):
+        if self.n_loop <= 0:
+            sample_count = 0
+        else:
+            total_time = self.estimate_execution_time()
+            sample_time = self.sample_time()  # ms
+            sample_count = floor(total_time / sample_time)
+        return sample_count
+
+    def _orders_execution_time(self, orders):
+        """
+        Args:
+            orders: list of order and value. For example: [['wait', 1], ['jump',0], ...]
+
+        Returns: execution time of orders in ms
+
+        """
+        time_us = 0
+        for slot in orders:
+            order, value = slot
+            if order == 'trigger':
+                time_us += self.delay_trigger
+            elif order == 'wait':
+                value = value * 1e3  # to us
+                time_us += self.delay_wait_offset + value * self.delay_wait_value
+            elif order == 'jump':  # jump means end of sequence
+                time_us += self.delay_jump
+                break
+            else:  # DAC movement
+                time_us += self.delay_move
+        time_ms = time_us * 1e-3
+        return time_ms
+
+    """
+    Time estimation
+    """
+
+    def estimate_execution_time(self):
+        pre_time = self.estimate_presequence_time()
+        seq_time = self.estimate_single_sequence_time()
+        total_time = pre_time + seq_time * self.n_loop  # us
+        return total_time
+
+    def estimate_presequence_time(self):
+        return self.estimate_execution_time_until_flag('end_presequence')
+
+    def estimate_single_sequence_time(self):
+        return self.estimate_execution_time_between_flags('end_presequence', 'end_sequence')
+
+    def estimate_execution_time_until_index(self, index):
+        return self._orders_execution_time(self.orders[:index])
+
+    def estimate_execution_time_until_flag(self, flag):
+        index = self.flags[flag]
+        return self.estimate_execution_time_until_index(index)
+
+    def estimate_execution_time_between_indexes(self, index1, index2):
+        orders = self.orders[index1:index2]
+        ramp = self.ramp_mode()
+        if ramp:
+            sc = self._orders_ramp_sample_count(orders)
+            time = sc * self.sample_time()
+        else:
+            time = self._orders_execution_time(orders)
+        return time
+
+    def estimate_execution_time_between_flags(self, flag1, flag2):
+        i1 = self.flags[flag1]
+        i2 = self.flags[flag2]
+        return self.estimate_execution_time_between_indexes(i1, i2)
+
+    """
+    User-friendly print
+    """
+
+    def print(self):
+        idx_dict = {}
+        for name, idx in self.flags.items():
+            if idx not in idx_dict.keys():
+                idx_dict[idx] = []
+            idx_dict[idx].append(name)
+
+        max_idx = max(max(idx_dict.keys()), self.get_last_slot_index())
+        text_lines = {i: [] for i in range(max_idx + 1)}
+        for idx, names in idx_dict.items():
+            flags = ', '.join(names)
+            text_lines[idx].append(f'[flags] {flags}')
+        for idx, info in enumerate(self.orders):
+            order, value = info
+            text_lines[idx].append(f'[{idx}] {order}: {value}')
+        text = '\n'.join(['\n'.join(line) for line in text_lines.values()])
+        print(text)
+        if self.n_loop <= 0:
+            print(f'Estimated execution time: infinite loop')
+        else:
+            print(f'Estimated execution time: {self.estimate_execution_time():.2f} ms')
+
+    def get_slot_param_by_index(self, index: int):
+        return list(self.slots.values())[index]
+
+    def get_slot_param_by_name(self, name: str):
+        if name in self.slots.keys():
+            return self.slots[name]
+        else:
+            raise KeyError(f'Slot parameter ({name}) not found')
+
+    def get_sequence_array(self):
+        """
+        DEPRECATED
+        Old format of setting fast sequence with (2, N) array
+        """
+        if len(self._raw_orders) != len(self._raw_values):
+            raise ValueError('Mismatch between number of orders_ref and values')
+        raw_array = np.array([self._raw_orders, self._raw_values])
+        return raw_array
+
+    def send_Xmit_order(self, order: int, stop: bool = True):
+        """
+        order: Xmit order
+        stop: flag to stop fast sequence before sending the order
+        """
+        if self._status and stop:  # running and stop flag
+            self.stop()
+        self.dac.send_Xmit_order(order)
+
+    """
+    Parameters
+    """
+
+    def get_status(self):
+        return self._status
+
+    def set_status(self, value: bool):
+        """
+        Start/Stop fast sequence
+        Each time fast sequence is started, it is necessary to set sample count.
+        """
+        # self.start() if value else self.stop()
+        if value:
+            sample_count = self.get_sample_count()
+            self.set_sample_count(sample_count) if sample_count else 0
+        order_number = self._Xmit_order_status(value)
+        self.send_Xmit_order(order=order_number, stop=False)  # deactivate stop flag
+        self._status = value
+
+    def _Xmit_order_status(self, value: bool):
+        n = 2 if value else 1
+        order_number = join_8_8bit264bit(5, n, 0, 0, 0, 0, 0, 0)
+        return order_number
+
+    def get_sample_time(self):
+        return self._sample_time
+
+    def set_sample_time(self, value: Union[int, float]):
+        order_number = self._Xmit_order_sample_time(value)
+        self.send_Xmit_order(order=order_number)
+        self._sample_time = value
+
+    def _Xmit_order_sample_time(self, value: Union[int, float]):
+        divider = ms2FS_divider(value)
+        order_number = join_numbers(5, 7, final_size=16)
+        order_number = join_numbers(order_number, 0, final_size=32)
+        order_number = join_numbers(order_number, divider, final_size=64)
+        return order_number
+
+    def get_ramp_mode(self):
+        return self._ramp_mode
+
+    def set_ramp_mode(self, value: bool):
+        self._ramp_mode = value
+
+        if value:
+            order_number = self._Xmit_order_unset_stop_count()
+        else:
+            order_number = self._Xmit_order_unset_ramp()
+        self.send_Xmit_order(order=order_number)
+
+        # JL: Reset sample counts because it depends on the mode, but I don't know what's the difference
+        self.set_sample_count(self.get_sample_count())
+
+    def _Xmit_order_unset_stop_count(self):
+        order_number = join_8_8bit264bit(5, 6, 0, 0, 0, 0, 0, 0)
+        return order_number
+
+    def _Xmit_order_unset_ramp(self):
+        order_number = join_8_8bit264bit(6, 9, 0, 0, 0, 0, 0, 0)
+        return order_number
+
+    def get_sample_count(self):
+        return self._sample_count
+
+    def set_sample_count(self, value: int):
+        ramp = self.get_ramp_mode()
+        if ramp:
+            order_number = self._Xmit_order_ramp_sample_count(value)
+        else:
+            order_number = self._Xmit_order_sequence_sample_count(value)
+        self.send_Xmit_order(order=order_number)
+        self._sample_count = value
+
+    def _Xmit_order_ramp_sample_count(self, value: int):
+        # It is hardcoded (in the bitfile probably) that sample_count = 0 is equivalent to 1
+        # Manually correct this by subtracting 1 pt
+        value -= 1
+        order_number = join_numbers(5, 8, final_size=16)
+        order_number = join_numbers(order_number, 0, final_size=32)
+        value = join_numbers(0, value, final_size=32)
+        order_number = join_numbers(order_number, value, final_size=64)
+        return order_number
+
+    def _Xmit_order_sequence_sample_count(self, value: int):
+        # It is hardcoded (in the bitfile probably) that sample_count = 0 is equivalent to 1
+        # Manually correct this by subtracting 1 pt
+        value -= 1
+        order_number = join_numbers(5, 5, final_size=16)
+        order_number = join_numbers(order_number, 0, final_size=32)
+        value = join_numbers(0, value, final_size=32)
+        order_number = join_numbers(order_number, value, final_size=64)
+        return order_number
+
+    def get_trigger_length(self):
+        return self._trigger_length
+
+    def set_trigger_length(self, value: int):
+        order_number = self._Xmit_order_trigger_length(value)
+        self.send_Xmit_order(order=order_number)
+        self._trigger_length = value
+
+    def _Xmit_order_trigger_length(self, value: int):
+        order_number = join_numbers(5, 10, final_size=16)
+        order_number = join_numbers(order_number, 0, final_size=32)
+        length = join_numbers(0, value, final_size=32)
+        order_number = join_numbers(order_number, length, final_size=64)
+        return order_number
+
+    def add_channel(self, param: Union[Parameter, DelegateParameter, NEEL_DAC_Channel]):
+        index = len(self.used_channels)
+        if index + 1 > self.n_channels:
+            raise ValueError(f'Maximum number of DAC channel for sequencing ({self.n_channels}) is reached ')
+
+        if rhasattr(param, 'source.instrument.panel'):
+            # For DelegateParameter from controls
+            instr = param.source.instrument
+            name = param.name
+        elif rhasattr(param, 'instrument.panel'):
+            # For NEEL_DAC_Channel.v
+            instr = param.instrument
+            name = instr.name
+        elif rhasattr(param, 'panel'):
+            # For NEEL_DAC_Channel
+            instr = param
+            name = instr.v.name
+        else:
+            raise ValueError('Not a valid sequence channel to move')
+
+        panel = getattr(instr, 'panel')
+        channel = getattr(instr, 'channel')
+        attr_str = f'p{panel}.c{channel}'
+        orders = dict(self.orders_ref)
+        if attr_str not in orders.keys():
+            # Set sequence and update orders_ref and used_channels
+            self.set_sequence_channel(index, panel=panel, channel=channel, is_dummy=False)
+            orders[attr_str] = index
+            orders[name] = index
+            self.orders_ref = orders
+            self.used_channels.append(attr_str)
+        else:
+            # Retrieve index from order dictionary
+            index = orders[attr_str]
+        return name, index
+
+    def set_sequence_channel(self, index: int, panel: int = 0, channel: int = 0, is_dummy: bool = False):
+        """
+        Allocate DAC panel_channel to fast sequence channels
+        """
         if is_dummy:
-            # Dummy channel is 255.
+            panel = 0
             channel = 255
-        else:
-            channel = panel_channel['channel']
-        # Check whether fast_chan_number is out of range or not.
-        if fast_chan_number < 0:
-            fast_chan_number = 0
-            print('fast channel number is out of range and cast to closest available value.')
-        elif fast_chan_number > 31:
-            fast_chan_number = 31
-            print('fast channel number is out of range and cast to closest available value.')
-            
-        order_number = join_8_8bit264bit(5,3,0,0,fast_chan_number,0,panel,channel)
-        
-        self.DAC_Xmit_order(order = order_number)
-        
-    def fastseq_set_slot(self,
-                         choice={'DAC':0, 'timing':1, 'triggers':2, 'jump':3}['DAC'],
-                         slot_number=0,
-                         fast_chan_number=0,
-                         DAC_Offset = 0.0,
-                         time_ms = 0.0,
-                         trigger = {'trig1_ramp':False, 'trig2':False, 'trig3':False, 'trig4':False, 'stop':False},
-                         jump2 = 0,
-                         ):
-        """
-        Set fast sequence slot
-        """
-        if choice == 0:
-            #DAC
-            if fast_chan_number < 0:
-                fast_chan_number = 0
-#             elif fast_chan_number > (2**4-1):
-#                 fast_chan_number = (2**4-1)
-#             value = fast_chan_number + (choice << 4)
-            elif fast_chan_number > (2**5-1): # HE 32
-                fast_chan_number = (2**5-1)
-            val = fast_chan_number + (choice << 4)
-            print(val) # HE
+        order_number = join_8_8bit264bit(5, 3, 0, 0, index, 0, panel, channel)
+        self.send_Xmit_order(order=order_number)
 
-#             order_number = join_numbers(5,4,final_size=16)
-            order_number = join_numbers(5,4,final_size=16) # HE 32
-            val = join_numbers(val, 0, final_size=16)
-            order_number = join_numbers(order_number, val, final_size=32)
-            
-            # detailed safe check will be performed elsewhere
-            # here we only check the value is smaller than |5|.
-            if DAC_Offset < -5.0:
-                DAC_Offset = -5.0
-                print('DAC offset input value is not normal. Please check it.')
-            elif DAC_Offset > 5.0:
-                DAC_Offset = 5.0
-                print('DAC offset input value is not normal. Please check it.')
-                
-            DAC_Offset = DAC_Offset/5.0 * 32768
-            
-            if slot_number < 0:
-                slot_number = 0
-            elif slot_number > (2**16-1):
-                slot_number = 65535
-            val = join_numbers(slot_number, DAC_Offset, final_size=32)
-            
-            order_number = join_numbers(order_number, val, final_size=64)
-        elif choice == 1:
-            # Timing
-            val = (choice << 4)
-            order_number = join_numbers(5,4,final_size=16)
-            val = join_numbers(val,0,final_size=16)
-            
-            order_number = join_numbers(order_number, val, final_size=32)
-            
-            # Convert time to us
-            time_ms = np.abs(time_ms*1000.0)
-            if time_ms < 1:
-                # Force wait time above 1 us.
-                time_ms = 1.0
-            val = np.int64(np.floor(np.log2(time_ms))) - 10
-            if val < 0:
-                val = 0
-            time_ms = np.floor(time_ms * (2.0**(-val)))
-            if time_ms > ((2**11)-1):
-                # Time(ms) is casted to 11bit in LabVIEW program
-                # so I will do the same.
-                time_ms = ((2**11)-1)
-            val = time_ms + (val << 11)
-            val = join_numbers(slot_number, val, final_size=32)
-            
-            order_number = join_numbers(order_number, val, final_size=64)
-        elif choice == 2:
-            # triggers
-            val = (choice << 4)
-            
-            order_number = join_numbers(5,4,final_size=16)
-            val = join_numbers(val,0,final_size=16)
-            
-            order_number = join_numbers(order_number, val, final_size=32)
-            
+    def add_slot(self, order: str, *args, **kwargs):
+        if order == 'wait':
+            self.add_slot_wait(*args, **kwargs)
+        elif order == 'jump':
+            self.add_slot_jump(*args, **kwargs)
+        elif order == 'trigger':
+            self.add_slot_trigger(*args, **kwargs)
+        elif order == 'move':
+            self.add_slot_move(*args, **kwargs)
+        elif order == 'end':
+            self.add_slot_end()
+        else:
+            raise KeyError(f'{order} is an invalid sequence order')
+
+    def add_slot_wait(self, value: Union[int, float], alias: Optional[str] = None):
+        index = self._add_slot_order(
+            order='wait',
+            value=value,
+        )
+
+        def _get():
+            return self.orders[index][1]
+
+        def _set(v):
+            self.orders[index][1] = v
+            self._raw_values[index] = v
+            self._set_slot_wait(v, index)
+
+        name = str(alias) if alias else f's{index}_wait'
+        label = f'[{index}] {name}' if alias else f'[{index}] Wait'
+        p = Parameter(name=name,
+                      label=label,
+                      unit='ms',
+                      set_cmd=_set,
+                      get_cmd=_get,
+                      initial_value=value,
+                      )
+        self._add_parameter_to_slots(p)
+        return p
+
+    def _set_slot_wait(self, value: Union[int, float], slot_number: int):
+        val = (1 << 4)
+        order_number = join_numbers(5, 4, final_size=16)
+        val = join_numbers(val, 0, final_size=16)
+
+        order_number = join_numbers(order_number, val, final_size=32)
+
+        # Convert time to us
+        time_ms = np.abs(value * 1000.0)
+        if time_ms < 1:
+            # Force wait time above 1 us.
+            time_ms = 1.0
+        val = np.int64(np.floor(np.log2(time_ms))) - 10
+        if val < 0:
             val = 0
-            if trigger['trig1_ramp']:
-                val += 2**0
-            if trigger['trig2']:
-                val += 2**1
-            if trigger['trig3']:
-                val += 2**2
-            if trigger['trig4']:
-                val += 2**3
-            if trigger['stop']:
-                val += 2**15
-            val = join_numbers(slot_number, val, final_size=32)
-            
-            order_number = join_numbers(order_number, val, final_size=64)
-        elif choice == 3:
-            # jump
-            val = (choice << 4)
-            
-            order_number = join_numbers(5,4,final_size=16)
-            val = join_numbers(val,0,final_size=16)
-            
-            order_number = join_numbers(order_number, val, final_size=32)
-            val = join_numbers(slot_number, jump2, final_size=32)
-            
-            order_number = join_numbers(order_number, val, final_size=64)
-        
-        self.DAC_Xmit_order(order = order_number)
-        
-    def fast_seq_set_slots(self,
-                           seq_array: np.ndarray):
+        time_ms = np.floor(time_ms * (2.0 ** (-val)))
+        if time_ms > ((2 ** 11) - 1):
+            # Time(ms) is casted to 11bit in LabVIEW program
+            # so I will do the same.
+            time_ms = ((2 ** 11) - 1)
+        val = time_ms + (val << 11)
+        val = join_numbers(slot_number, val, final_size=32)
+        order_number = join_numbers(order_number, val, final_size=64)
+        self.send_Xmit_order(order_number)
+
+    def add_slot_jump(self, value: int, alias: Optional[str] = None):
+        index = self._add_slot_order(
+            order='jump',
+            value=value,
+        )
+
+        def _get():
+            return self.orders[index][1]
+
+        def _set(v):
+            last_index = self.get_last_slot_index()
+            if 0 <= v <= last_index:
+                self.orders[index][1] = v
+                self._raw_values[index] = v
+                self._set_slot_jump(v, index)
+            else:
+                raise ValueError(f'Jump index ({v}) has to be between 0 and the last index ({last_index})')
+
+        name = str(alias) if alias else f's{index}_jump'
+        label = f'[{index}] {name}' if alias else f'[{index}] Jump'
+        p = Parameter(name=name,
+                      label=label,
+                      unit='index',
+                      set_cmd=_set,
+                      get_cmd=_get,
+                      initial_value=value,
+                      )
+        self._add_parameter_to_slots(p)
+        return p
+
+    def _set_slot_jump(self, value: int, slot_number: int):
+        val = (3 << 4)
+        order_number = join_numbers(5, 4, final_size=16)
+        val = join_numbers(val, 0, final_size=16)
+        order_number = join_numbers(order_number, val, final_size=32)
+        val = join_numbers(slot_number, value, final_size=32)
+        order_number = join_numbers(order_number, val, final_size=64)
+        self.send_Xmit_order(order_number)
+
+    def add_slot_end(self):
+        index = self.get_last_slot_index()
+        param = self.add_slot_jump(index + 1)
+        return param
+
+    def add_slot_trigger(self, value, alias: Optional[str] = None):
         """
+        value = [ True, False, True, ...] or [1,0,1,...] or '1011'
+        """
+
+        index = self._add_slot_order(
+            order='trigger',
+            value=value,
+        )
+
+        def _set(v):
+            int_value = 0
+            for i, vi in enumerate(v):
+                if vi not in [0, 1, False, True, '0', '1']:
+                    raise ValueError(f'Invalid trigger value: {vi}')
+                elif vi in [True, 1]:
+                    int_value += 2 ** i
+            self._raw_values[index] = int_value
+            self._set_slot_trigger(int_value, index)
+            self.orders[index][1] = v
+
+        def _get():
+            """
+            return a list of boolean like [ True, False, True, ...]
+            """
+            int_value = self._raw_values[index]
+            value = []
+            for i in range(5):  # hardcoded due to 5 trigger ports
+                if not (int_value & 2 ** i) == 0:
+                    value.append(True)
+                else:
+                    value.append(False)
+            return value
+
+        name = str(alias) if alias else f's{index}_trigger'
+        label = f'[{index}] {name}' if alias else f'[{index}] Trigger'
+        p = Parameter(name=name,
+                      label=label,
+                      unit='index',
+                      set_cmd=_set,
+                      get_cmd=_get,
+                      initial_value=value,
+                      )
+        self._add_parameter_to_slots(p)
+        return p
+
+    def _set_slot_trigger(self, value: int, slot_number: int):
+        val = (2 << 4)
+        order_number = join_numbers(5, 4, final_size=16)
+        val = join_numbers(val, 0, final_size=16)
+        order_number = join_numbers(order_number, val, final_size=32)
+        val = join_numbers(slot_number, value, final_size=32)
+        order_number = join_numbers(order_number, val, final_size=64)
+        self.send_Xmit_order(order_number)
+
+    def add_slot_move(self, param: Union[Parameter, DelegateParameter], value: Union[int, float],
+                      alias: Optional[str] = None, relative=False):
+        """
+        param: Parameter of NEEL_DAC_Channel or DelegateParameter from controls
+        relative: delta voltage shift with respect to the current DC value
+        """
+        if relative:
+            return self.add_slot_move_relative(param, value, alias=alias)
+        else:
+            return self.add_slot_move_absolute(param, value, alias=alias)
+
+    def add_slot_move_absolute(self, param: Union[Parameter, DelegateParameter], value: Union[int, float],
+                               alias: Optional[str] = None):
+        """
+        param: Parameter of NEEL_DAC_Channel or DelegateParameter from controls
+        relative: delta voltage shift with respect to the current DC value
+        """
+        order_key, channel_index = self.add_channel(param)
+
+        index = self._add_slot_order(
+            order=order_key,
+            value=value,
+        )
+
+        def _get():
+            return self.orders[index][1]
+
+        def _set(v):
+            dc_value = param()
+            delta = v - dc_value
+            self.orders[index][1] = v
+            self._raw_values[index] = delta
+            self._set_slot_move(delta, index, channel_index)
+
+        name = str(alias) if alias else f's{index}_move_{order_key}'
+        label = f'[{index}] {name}' if alias else f'[{index}] {order_key}'
+
+        # Find limits
+        vrange = abs(self.dac.voltage_range)
+        plims = param.vals.valid_values
+        lims = plims if plims else [-vrange, +vrange]
+
+        # Create parameter
+        p = Parameter(name=name,
+                      label=label,
+                      unit=param.unit,
+                      set_cmd=_set,
+                      get_cmd=_get,
+                      initial_value=value,
+                      vals=vals.Numbers(*lims),
+                      # instrument=param.instrument,
+                      )
+        self._add_parameter_to_slots(p)
+        return p
+
+    def add_slot_move_relative(self, param: Union[Parameter, DelegateParameter], value: Union[int, float],
+                               alias: Optional[str] = None):
+        """
+        param: Parameter of NEEL_DAC_Channel or DelegateParameter from controls
+        """
+        order_key, channel_index = self.add_channel(param)
+
+        index = self._add_slot_order(
+            order=order_key,
+            value=value,
+        )
+
+        def _get():
+            return np.array(self.orders)[index, 1]
+
+        def _set(v):
+            dc_value = param()
+            target = dc_value + v
+            if param.vals.valid_values:
+                dc_min, dc_max = param.vals.valid_values
+                if not dc_min < target < dc_max:
+                    raise ValueError(f'Relative move of {param.name} exceeds the safety limit of the DAC channel')
+            self.orders[index][1] = target
+            self._raw_values[index] = v
+            self._set_slot_move(v, index, channel_index)
+
+        name = str(alias) if alias else f's{index}_move_dV_{order_key}'
+        label = f'[{index}] {name}' if alias else f'[{index}] dV_{order_key}'
+
+        p = Parameter(name=name,
+                      label=label,
+                      unit=param.unit,
+                      set_cmd=_set,
+                      get_cmd=_get,
+                      initial_value=value,
+                      # instrument=param.instrument,
+                      )
+        self._add_parameter_to_slots(p)
+        return p
+
+    def _set_slot_move(self, value: Union[int, float], slot_number: int, channel: int):
+        val = channel + (0 << 4)
+        order_number = join_numbers(5, 4, final_size=16)
+        val = join_numbers(val, 0, final_size=16)
+        order_number = join_numbers(order_number, val, final_size=32)
+
+        value = value * 2  # correction
+        res = 2 ** self.dac.bits_resolution
+        vrange = self.dac.voltage_range
+        bit_value = value / vrange * res
+        val = join_numbers(slot_number, bit_value, final_size=32)
+        order_number = join_numbers(order_number, val, final_size=64)
+        self.send_Xmit_order(order_number)
+
+    def add_slot_init(self):
+        """
+        Default first slot for initializing the sequence.
+        This is automatically applied when self.reset() to avoid unexpected behaviours
+        """
+        param = self.add_slot_trigger([0] * 5, alias='init_triggers')
+        return param
+
+    def _add_slot_order(self, order: str, value):
+        if order in self.orders_ref.keys():
+            self.orders.append([order, value])
+        else:
+            raise KeyError(f'{order} is not a valid order')
+        if len(self.slots) >= self.max_slots:
+            raise ValueError(f'Maximum number of slots ({self.max_slots} has been reached')
+        index = self._add_raw_order_value(self.orders_ref[order], value)
+        self.flags['end_sequence'] = index + 1
+        return index
+
+    def _add_raw_order_value(self, raw_order: int, value):
+        self._raw_orders.append(raw_order)
+        self._raw_values.append(value)
+        index = len(self._raw_values) - 1
+        return index
+
+    def _add_parameter_to_slots(self, param: Union[Parameter, DelegateParameter]):
+        key = param.name
+        if key in self.slots.keys():
+            raise KeyError(f'Parameter with name {key} is already in use')
+        self.slots[key] = param
+
+    def get_last_slot_index(self):
+        return len(self.orders) - 1
+
+    def get_sequence_init_index(self):
+        return self.prelength
+
+    def set_sequence_with_array(self, arr):
+        """
+        DEPRECATED
         This function set slots of fast sequence by the given array.
-        
+
         Args:
-            seq_array: (2,N) dimensional array
-            
-            [Limitation for N: 1<= N <= 4096
+            arr: (2,N) dimensional array
+
+            [Limitation for N: 1<= N <= 2**12 (4096) Hardware limitation?
             (0,:) is parameter (0 ~ 15: fast channels, 101: trigger,
             102: timing (ms), 103: jump, else: jump to its index)
-            
-	        (1,:) is values. (DAC = value offset,
+
+            (1,:) is values. (DAC = value offset,
             trigger = bit wise value for each trigger (1~4, stop)
-		    timing = ms to wait, jump = # of slot ot jump)]
+            timing = ms to wait
+            jump = # of slot ot jump
         """
-        # Check array size and cut down if it is too large.
-        if seq_array.shape[1] > 4096:
-            seq_array = seq_array[:,0:4096]
-        
-        N = seq_array.shape[1]
-        for i in range(N):
-            tp = int(seq_array[0,i])
-            value = seq_array[1,i]
-#             if tp < 16:
-            if tp < 32:
+        max_len = 2 ** 12  # why? hardware limitation?
+        if arr.shape[1] > max_len:
+            arr = arr[:, 0:max_len]
 
-                # DAC shift
-                dac_move_min = min(self._FS_move_limit[0], self._FS_move_limit[1])
-                dac_move_max = max(self._FS_move_limit[0], self._FS_move_limit[1])
-                # Limit check
-                if value < dac_move_min:
-                    value = dac_move_min
-                    print('Compliance is applied and dac move value is cast to {:f}'.format(dac_move_min))
-                if value > dac_move_max:
-                    value = dac_move_max
-                    print('Compliance is applied and dac move value is cast to {:f}'.format(dac_move_max))
-                    
-                self.fastseq_set_slot(choice=0,
-                                     slot_number=i,
-                                     fast_chan_number=tp,
-                                     DAC_Offset = value)
-            elif tp == 101:
-                # Trigger control
-                trigger = {'trig1_ramp':False, 'trig2':False, 'trig3':False, 'trig4':False, 'stop':False}
-                value = int(value)
-                if not (value & 2**0)==0:
-                    trigger['trig1_ramp']=True
-                if not (value & 2**1)==0:
-                    trigger['trig2']=True
-                if not (value & 2**2)==0:
-                    trigger['trig3']=True
-                if not (value & 2**3)==0:
-                    trigger['trig4']=True
-                if not (value & 2**4)==0:
-                    trigger['stop']=True
-                    
-                self.fastseq_set_slot(choice=2,
-                                     slot_number=i,
-                                     trigger = trigger)
-            elif tp == 102:
-                # Timing (wait) (ms)
-                self.fastseq_set_slot(choice=1,
-                                     slot_number=i,
-                                     time_ms = value)
-            elif tp == 103:
-                # Jump to slot ??
-                self.fastseq_set_slot(choice=3,
-                                     slot_number=i,
-                                     jump2 = np.uint16(value))
+        n = arr.shape[1]
+        for index in range(n):
+            order = arr[0, index]
+            value = arr[1, index]
+            if 0 >= order > self.n_channels:
+                self._set_slot_move(value, index, order)
+            # elif order == 100:
+            #     self._set_end_slot(value, index)
+            elif order == 101:
+                self._set_slot_trigger(value, index)
+            elif order == 102:
+                self._set_timing_slot(value, index)
+            elif order == 103:
+                self._set_slot_jump(value, index)
             else:
-                raise ValueError('fast sequence contains undefined type number.')
-        
-    def DAC_set_stop_sample_count(self,
-                                  sample_count=0,
-                                  ):
-        order_number = join_numbers(5,5,final_size=16)
-        
-        order_number = join_numbers(order_number,0,final_size=32)
-        val = join_numbers(0,sample_count,final_size=32)
+                raise ValueError(f'{order} is not a valid sequence order number.')
 
-        order_number = join_numbers(order_number, val, final_size=64)
-        
-        self.DAC_Xmit_order(order = order_number)
-       
-#    """ FUNCTIONS TO CONTROL SHORT-CUT REFERENCE TO NEEL_DAC_CHANNEL """
-#    
-#    def configure(self, settings = None):
-#        """
-#        This function applies a list of settings on various NEEL_DAC_CHANNELS.
-#        
-#         settings (list): list of dictionaries for different channels.
-#         Example:
-#         settings = [
-#             { 'channel': [1,0],  'alias': 'right barrier',  'voltage': -0.1,  'range': [-5.0,+0.3],  'label': r'$V_{\rm BR}$'},
-#             { 'channel': [2,0],  'alias': 'left barrier',   'voltage': -0.2,  'range': [-5.0,+0.3],  'label': r'$V_{\rm BL}$'},
-#             ...
-#             ]
-#         """
-#         for setting in settings:
-#             panel = 'p{:d}'.format(setting['channel'][0])
-#             channel = 'c{:d}'.format(setting['channel'][1])
-#             self.v[setting['alias']] = self.submodules[panel].submodules[channel].v
-#             # transform range-attribute for QCoDeS:
-#             setting['vals'] = vals.Numbers(  np.min(setting['range']), np.max(setting['range'])  )
-#             # set voltage:
-#             self.v[setting['alias']].set(setting['voltage'])
-#             # set channel attributes:
-#             for key, item in setting.items():
-#                 try:
-#                     setattr(self.v[setting['alias']], key, item)
-#                 except:
-#                     #print(key,'not found!') # for testing of code
-#                     pass
-                
-#    def clear_v(self, aliases = None):
-        
+    def add_flag(self, name, overwrite=False):
+        index = self.get_last_slot_index() + 1
+        if not overwrite and name in self.flags.keys():
+            raise KeyError(f'Flag "{name}" is already defined')
+        self.flags[name] = index
+        return index
 
-        
-if __name__=='__main__':
-    dac = NEEL_DAC('dac')
-    #------------------------
-    # Test DAC movement
-    #------------------------
-#    dac.p0.c0.v(-0.0)
-#    dac.DAC_start_movement()
-#    dac.DAC_wait_end_of_move()
-#    
-#    # Test lock-in
-#    dac.LI_status(False)
-#    dac.LI_frequency(20.0)
-#    dac.LI_amplitude(0.2)
-#    dac.LI_channel(0)
-#    dac.LI_status(False)
+    def flag_end_presequence(self):
+        self.add_flag('end_presequence', overwrite=True)
+
+    def add_slot_jump_to_init(self):
+        index = self.flags['end_presequence']
+        param = self.add_slot_jump(index)
+        return param
+
+    def repeat_sequence(self, n: int):
+        """
+        n: number of sequence repetitions (n=0: infinite loop)
+        """
+        self.n_loop = n
+
+    def repeat_infinite(self):
+        self.repeat_sequence(n=0)
+
+
+class NEEL_DAC_LockIn(InstrumentChannel):
+    """
+    This class holds information about Lock-In mode
+    NOTE: not tested
+
+    Args:
+        parent (Instrument): NEEL_DAC
+    """
+
+    def __init__(self,
+                 parent: Instrument,
+                 **kwargs) -> None:
+        super().__init__(parent, 'lock_in', **kwargs)
+        self.dac = self._parent
+        self._status = False
+        self._frequency = 0  # Hz
+        self._amplitude = 0  # V
+        self._channel = [0, 0]  # [panel, channel]
+
+        self.add_parameter('status',
+                           label='Lock-in status',
+                           get_cmd=self.get_status,
+                           set_cmd=self.set_status,
+                           # initial_value=self._status,
+                           )
+
+        self.add_parameter('frequency',
+                           label='Lock-in frequency',
+                           unit='Hz',
+                           get_cmd=self.get_frequency,
+                           set_cmd=self.set_frequency,
+                           get_parser=float,
+                           set_parser=float,
+                           post_delay=0.45,  # HE: wait after move such that the lock-in-detector can follow
+                           vals=vals.Numbers(0.0, 50000.0),
+                           # initial_value=self._frequency,
+                           )
+
+        self.add_parameter('amplitude',
+                           label='Lock-in amplitude',
+                           unit='V',
+                           get_cmd=self.get_amplitude,
+                           set_cmd=self.set_amplitude,
+                           get_parser=float,
+                           set_parser=float,
+                           post_delay=0.45,  # HE: wait after move such that the lock-in-detector can follow
+                           # vals=vals.Numbers(0.0, abs(self.dac.voltage_range)),
+                           # initial_value=self._amplitude,
+                           )
+
+        self.add_parameter('channel',  # HE
+                           label='Lock-in channel',
+                           get_cmd=self.get_channel,
+                           set_cmd=self.set_channel,
+                           get_parser=list,
+                           set_parser=list,
+                           vals=vals.Lists(vals.Ints(0, self.dac.max_channels)),
+                           # initial_value=self._channel,
+                           )
+
+        self.configure_analysis()
+        self.stop()
+
+    def stop(self):
+        """
+        Stop lock-in output if running.
+        """
+        self.status(False)
+
+    def start(self):
+        """
+        Start lock-in output
+        """
+        self.status(True)
+
+    def send_Xmit_order(self, order: int, stop: bool = True):
+        """
+        order: Xmit order
+        stop: flag to stop lock-in output before sending the order
+        """
+        if self._status and stop:  # running and stop flag
+            self.stop()
+        self.dac.send_Xmit_order(order)
+
+    def get_status(self):
+        return self._status
+
+    def set_status(self, val: bool):
+        self._status = val
+        stop = not val
+        v = 1 if stop else 0
+        order_number = join_8_8bit264bit(2, 3, 0, 0, 0, 0, 0, v)
+        self.send_Xmit_order(order_number, stop=False)
+
+    def get_frequency(self):
+        return self._frequency
+
+    def set_frequency(self, value: float):
+        """
+        Stop before sending order + Start
+        value: frequency in Hz
+        """
+        self._frequency = value
+        order_number = self._Xmit_order_frequency(value)
+        self.send_Xmit_order(order_number, stop=True)
+
+    def _Xmit_order_frequency(self, value: float):
+        f = 25000 / value
+        if f < 1:
+            f = 1
+        elif f > 4e9:
+            f = 4e9
+        f = np.uint32(f)
+        a, b = split_number(f, size=32)
+        c, d = split_number(a, size=16)
+        e, f = split_number(b, size=16)
+        order_number = join_8_8bit264bit(2, 4, 0, 0, c, d, e, f)
+        return order_number
+
+    def get_amplitude(self):
+        return self._amplitude
+
+    def set_amplitude(self, value: float):
+        self._amplitude = np.abs(value)
+        order_number = self._Xmit_order_amplitude(value)
+        self.send_Xmit_order(order_number, stop=True)
+
+    def _Xmit_order_amplitude(self, value: float):
+        vrange = abs(self.dac.voltage_range)
+        value = -vrange if value < -vrange else value
+        value = +vrange if value > +vrange else value
+        vmax = 2 * vrange
+
+        value = value * 2  # correction
+        res = 2 ** self.dac.bits_resolution
+        a = value / vmax * res
+        a = np.uint16(a)
+        b, c = split_number(a, 16)
+        order_number = join_8_8bit264bit(2, 2, 0, 0, 0, 0, b, c)
+        return order_number
+
+    def get_channel(self):
+        return self._channel
+
+    def set_channel(self, value: List[int]):
+        panel, channel = value
+        order_number = join_8_8bit264bit(2, 1, 0, 0, 0, 0, panel, channel)
+        self.send_Xmit_order(order_number, stop=True)
+        self._channel = value
+
+    def set_channel_by_param(self, param: Union[Parameter, DelegateParameter, NEEL_DAC_Channel]):
+        if rhasattr(param, 'source.instrument.panel'):
+            # For DelegateParameter from controls
+            instr = param.source.instrument
+        elif rhasattr(param, 'instrument.panel'):
+            # For NEEL_DAC_Channel.v
+            instr = param.instrument
+        elif rhasattr(param, 'panel'):
+            # For NEEL_DAC_Channel
+            instr = param
+        else:
+            raise ValueError('Not a valid parameter')
+        panel = instr.panel
+        channel = instr.channel
+        self.set_channel([panel, channel])
+
+    """
+    Analysis
+    JL: What are all these "analysis" parameters?
+    """
+
+    def configure_analysis(self):
+        # JL: I don't know what is this so I copy/paste from the old driver
+        self.set_anlaysis_send_back_data(1)  # average
+        self.set_analysis_dt_over_tau(8.00006091594696044921875000000000E-6)
+
+    def set_anlaysis_send_back_data(self, value: int):
+        """
+        value: 0 (lock-in) and 1 (average)
+        JL: What is this?
+        """
+        order_number = join_8_8bit264bit(3, 1, 0, 0, 0, 0, 0, value)
+        self.send_Xmit_order(order_number, stop=True)
+
+    def set_analysis_dt_over_tau(self, value):
+        """
+        value: ???
+        JL: What is this?
+        """
+        dt_over_tau = value * (2 ** 32)  # Convert Fixed point to 32 bit integer
+        order_number = join_numbers(3, 2, 16)
+        order_number = join_numbers(order_number, 0, 32)
+        order_number = join_numbers(order_number, dt_over_tau, 64)
+        self.send_Xmit_order(order_number, stop=True)
+
+    def set_analysis_null(self):
+        order_number = join_8_8bit264bit(3, 0, 0, 0, 0, 0, 0, 0)
+        self.send_Xmit_order(order_number, stop=True)
+
+    def set_analysis_voltage_range(self, value: int):
+        """
+        value: 0 (10V), 1 (5V), 2 (1V)
+        JL: What is this?
+        """
+        order_number = join_8_8bit264bit(3, 3, 0, 0, 0, 0, 0, value)
+        self.send_Xmit_order(order_number, stop=True)
+
+
+class Virtual_NEEL_DAC(NEEL_DAC):
+    print_order = False
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        shape = (self.max_panels, self.max_panels)
+        self._values = np.zeros(shape)
+
+    def open(self):
+        print(f'Connected to: Virtual_NEEL_DAC with {self.address}')
+
+    def close(self):
+        print(f'Closed connection')
+
+    def send_Xmit_order(self, order=0):
+        if self.print_order:
+            print(f'Send Xmit order: {order}')
+
+    def create_panels(self):
+        self.submodules = {}
+        for n in self._panels:
+            name = f'p{n}'  # p for panel
+            panel = Virtual_NEEL_DAC_Panel(parent=self, name=name, panel_number=n)
+            self.add_submodule(name, panel)
+
+    def move(self, **kwargs):
+        """
+        Start DAC movement and optional waiting until the end
+
+        Args:
+            **kwargs:
+        """
+        # self.start()
+        # self.wait_end_of_move()
+        pass
+
+    def get_values(self, *args, **kwargs):
+        return self._values
+
+    def set_values(self, arr):
+        """
+        arr: array of values with shape (max_panels x max_channels) --> same as get_values()
+        """
+        super().set_values(arr)
+        self._values = arr
+
+    def set_value(self, panel: int, channel: int, value: Union[int, float]):
+        """
+        Change the DAC value of a given panel-channel
+        """
+        super().set_value(panel, channel, value)
+        self._values[panel, channel] = value
+
+
+class Virtual_NEEL_DAC_Panel(NEEL_DAC_Panel):
+
+    def create_channels(self):
+        for channel in range(self.dac.max_channels):
+            name = 'c{:d}'.format(channel)  # c stands for channel
+            channel_instance = Virtual_NEEL_DAC_Channel(self, name, channel)
+            self.add_submodule(name, channel_instance)
+
+
+class Virtual_NEEL_DAC_Channel(NEEL_DAC_Channel):
+
+    def set_value(self, value: float):
+        self.value = value
+        self.dac._values[self.panel, self.channel] = value
+
+
+if __name__ == '__main__':
+    from qube.measurement.controls import Controls
+
+    dac = Virtual_NEEL_DAC(
+        name='DAC',
+        bitfile='bitfile',
+        address='address',
+        panels=[1, 2, 3, 4],
+        delay_between_steps=1,
+        # initial_value=0,
+    )
+    dac.print_order = False
+
+    controls = Controls('controls')
+    TRR = controls.add_control(
+        'TRR',
+        source=dac.p2.c2.v,
+        label='TRR',
+        unit='V',
+        initial_value=-1.20,
+        vals=vals.Numbers(-2.2, 0.3),
+    )
+
+    TRC = controls.add_control(
+        'TRC',
+        source=dac.p3.c3.v,
+        label='TRC',
+        unit='V',
+        initial_value=-1.30,
+        vals=vals.Numbers(-2.2, 0.3),
+    )
+
+    seq = dac.sequencer
+    seq.set_ramp_mode(False)
+    # seq.set_channels([dac.p1.c1, gate1, dac.p3.c3.v, 'random'])
+    # print(seq.orders_ref)
+    seq.add_slot_trigger([0, 0, 0, 0, 0])
+    seq.add_slot_wait(1)  # ms
+    seq.add_slot_trigger([0, 1, 0, 0, 0])  # trigger ADC
+    TRR_load = seq.add_slot_move(TRR, -0.1, alias='TRR_load', relative=False)
+    TRC_load = seq.add_slot_move(TRC, -0.2, alias='TRC_load', relative=True)
+    p4c4 = seq.add_slot_move(dac.p4.c4.v, -0.5, alias='p4c4', relative=True)
+    random = seq.add_slot_move(dac.p4.c4.v, -1.0, alias='random', relative=False)
+    seq.add_slot_end()
+
+    # TRR_back = seq.add_move_slot(TRR, -2.3, alias='TRR_back', relative=False)
+    # TRC_back = seq.add_move_slot(TRC, 3, alias='TRC_back', relative=True)
+
+    """
+    My snippet for fast sequence
+
+    seq.add_trigger_slot([0,0,0,0,0])
+    seq.add_wait_slot(1) # ms
+    seq.add_trigger_slot([0,1,0,0,0]) # trigger ADC
+    TRR_load = seq.add_move_slot(TRR, -0.1, alias='TRR_load')
+    TRC_load = seq.add_move_slot(TRC, -0.2, alias='TRC_load')
+    wait_load = seq.add_wait_slot(0.1, alias='wait_load') # ms
+    seq.add_move_slot(TRR, 0, alias='TRR_load_back')
+    seq.add_move_slot(TRC, 0, alias='TRC_load_back')
+    seq.add_wait_slot(1, alias='wait_rise_seg0') # ms
+    seq.add_wait_slot(5, alias='wait_int_seg0') # ms
+    seq.add_trigger_slot([0,0,0,0,0]) # prepare trigger for SAW
+    trigger_SAW = seq.add_trigger_slot([0,0,1,0,0], alias='trigger_SAW') # trigger SAW
+
+    controls.add_control(TRR_load, ...)
+    controls.add_control(TRC_load, ...)
+    controls.add_control(wait_load, ...)
+    controls.add_control(trigger_SAW, ...)
+
+    seq.start()
+    """
+    li = dac.lockin
+
+    """
+    seq.add_slot_trigger([0, 0, 0, 0, 0])
+    seq.add_slot_wait(1)  # ms
+    seq.add_slot_trigger([0, 1, 0, 0, 0])  # trigger ADC
+    seq.flag_end_presequence()
+    TRR_load = seq.add_slot_move(TRR, -0.1, alias='TRR_load', relative=False)
+    TRC_load = seq.add_slot_move(TRC, -0.2, alias='TRC_load', relative=True)
+    seq.repeat_sequence(n=100)
     
-    #------------------------
-    # Test fast sequence
-    #------------------------
-    ramp = True
-    divider = 6661
-    sample_count = 403
-    
-    # Stop fast sequence
-    dac.FS_status(False)
-    # Set fast sequence divider
-    dac.FS_divider(divider)
-    # set operation mode ('ramp' or 'start')
-    dac.FS_ramp(ramp)
-    # Set fast sequence channels
-    dac.FS_chan_list(list(range(16)))
-    # Set pulse length
-    dac.FS_pulse_len(1000)
-    
-    # Set fast sequence
-    seq_array = np.zeros((2,sample_count))
-    seq_array[:,0] = [101,0]
-    seq_array[1,1:sample_count-1] = np.linspace(0.0, -0.5,num=sample_count-2)
-    seq_array[:,sample_count-1] = [103, sample_count-1]
-    dac.FS_slots(seq_array)
-    
-    # Set sample count
-    size = seq_array.shape[1]
-    dac.FS_sample_count(size)
-    
-    dac.FS_status(True)
-    
-    # sleep
-    sleep_time = 4.5e-7*divider*sample_count+5
-    time.sleep(sleep_time)
-    
-    dac.FS_status(False)
-    
-    dac.close()
-    
+    """

@@ -4,7 +4,7 @@ from qcodes import Parameter
 from qcodes import validators as vals
 
 from qube import Controls
-from qube.drivers.NEEL_DAC_JL import Virtual_NEEL_DAC, NEEL_DAC_Sequencer
+from qube.drivers.NEEL_DAC import Virtual_NEEL_DAC, NEEL_DAC_Sequencer
 
 V = Virtual_NEEL_DAC
 V.print_order = False
@@ -83,13 +83,19 @@ class Test_NEEL_DAC_Sequencer(unittest.TestCase):
         seq = dac.sequencer
         self.assertTrue(isinstance(seq, NEEL_DAC_Sequencer))
 
-        self.assertEqual(len(seq.slots), 0)
+        self.assertEqual(len(seq.slots), 1)
+        self.assertEqual(len(seq.orders), 1)
         self.assertEqual(len(seq.used_channels), 0)
-        self.assertEqual(len(seq.orders), 0)
+        self.assertTrue('end_presequence' in seq.default_flags.keys())
+        self.assertTrue('end_sequence' in seq.default_flags.keys())
+        self.assertEqual(seq.flags, seq.default_flags)
+        self.assertEqual(seq.orders[0], ['trigger', [0, 0, 0, 0, 0]])
+        self.assertEqual(seq.n_loop, 1)
+
         seq.set_ramp_mode(False)
         self.assertFalse(seq.ramp_mode())
         seq.set_sample_count(3)
-        self.assertEqual(seq.sample_counts(), 3)
+        self.assertEqual(seq.sample_count(), 3)
 
     def test_add_channel(self):
         dac = V(
@@ -104,12 +110,12 @@ class Test_NEEL_DAC_Sequencer(unittest.TestCase):
         # Check Parameter
         param = dac.p1.c1.v
         name, index = seq.add_channel(param)
-        self.assertEqual(name, param.name)
+        self.assertEqual(name, param.instrument.name)
         self.assertEqual(index, 0)
         self.assertEqual(len(seq.used_channels), 1)
         self.assertEqual(seq.used_channels[0], 'p1.c1')
-        self.assertEqual(seq.orders['p1.c1'], 0)
-        self.assertEqual(seq.orders[param.name], 0)
+        self.assertEqual(seq.orders_ref['p1.c1'], 0)
+        self.assertEqual(seq.orders_ref[name], 0)
 
         # Check DelegateParameter
         controls = Controls('controls')
@@ -119,19 +125,19 @@ class Test_NEEL_DAC_Sequencer(unittest.TestCase):
         self.assertEqual(index, 1)
         self.assertEqual(len(seq.used_channels), 2)
         self.assertEqual(seq.used_channels[1], 'p2.c2')
-        self.assertEqual(seq.orders['p2.c2'], 1)
-        self.assertEqual(seq.orders[param.name], 1)
+        self.assertEqual(seq.orders_ref['p2.c2'], 1)
+        self.assertEqual(seq.orders_ref[param.name], 1)
 
         # Check not valid channel
         self.assertRaises(ValueError, seq.add_channel, 'ramdon')
 
         # Reset channels
-        seq.reset_channels()
+        seq._reset_channels()
         self.assertEqual(len(seq.used_channels), 0)
-        self.assertEqual(len(seq.orders), 0)
+        self.assertEqual(len(seq.orders), 1)
 
         # Check max number of channels
-        self.used_channels = list(range(seq.n_channels))
+        seq.used_channels = list(range(seq.n_channels))
         self.assertRaises(ValueError, seq.add_channel, param)
 
     def test_slots(self):
@@ -150,71 +156,289 @@ class Test_NEEL_DAC_Sequencer(unittest.TestCase):
             source=dac.p1.c1.v,
             label='g1',
             unit='V',
-            initial_value=0,
             vals=vals.Numbers(-2, 1),
         )
-        g2 = controls.add_control(
-            'g2',
-            source=dac.p2.c2.v,
-            label='g2',
-            unit='V',
-            initial_value=-1.0,
-            vals=vals.Numbers(-0.5, 0.5),
-        )
-
-        self.assertEqual(len(seq.slots), 0)
-        self.assertEqual(len(seq.orders), 0)
-        seq.set_sample_count(3)
 
         s1 = seq.add_slot_trigger([0, 0, 0, 0, 0])
-        self.assertEqual(len(seq.slots), 1)
-        self.assertEqual(len(seq.orders), 1)
-        self.assertEqual(seq.sample_count(), 1)
-        self.assertTrue(isinstance(s1, Parameter))
-        self.assertEqual(seq.slots[s1.name], s1)
-        self.assertEqual(seq.orders[0], ['trigger', [0, 0, 0, 0, 0]])
-
-        s2 = seq.add_slot_wait(1)  # ms
         self.assertEqual(len(seq.slots), 2)
         self.assertEqual(len(seq.orders), 2)
-        self.assertEqual(seq.sample_count(), 2)
+        self.assertTrue(isinstance(s1, Parameter))
+        self.assertEqual(seq.slots[s1.name], s1)
+        self.assertEqual(seq.orders[1], ['trigger', [0, 0, 0, 0, 0]])
+
+        s2 = seq.add_slot_wait(1)  # ms
+        self.assertEqual(len(seq.slots), 3)
+        self.assertEqual(len(seq.orders), 3)
         self.assertTrue(isinstance(s2, Parameter))
         self.assertEqual(seq.slots[s2.name], s2)
-        self.assertEqual(seq.orders[1], ['wait', 1])
+        self.assertEqual(seq.orders[2], ['wait', 1])
 
-        # To finish
+        g1(-0.5)
+        s3 = seq.add_slot_move(g1, -0.1, alias='g1_load', relative=True)
+        self.assertEqual(s3.name, 'g1_load')
+        self.assertEqual(seq.slots['g1_load'], s3)
+        self.assertEqual(seq.orders[3], ['g1', -0.6])
+        self.assertEqual(seq._raw_values[3], -0.1)
 
-        # seq.add_trigger_slot([0, 1, 0, 0, 0])  # trigger ADC
-        # TRR_load = seq.add_move_slot(TRR, -0.1, alias='TRR_load', relative=False)
-        # TRC_load = seq.add_move_slot(TRC, -0.2, alias='TRC_load', relative=True)
-        # p4c4 = seq.add_move_slot(dac.p4.c4.v, -0.5, alias='p4c4', relative=True)
-        # random = seq.add_move_slot(dac.p4.c4.v, -1.0, alias='random', relative=False)
-        # seq.add_end_slot()
+        s4 = seq.add_slot_move(g1, -0.1, alias='g1_unload', relative=False)
+        self.assertEqual(seq.orders[4], ['g1', -0.1])
+        self.assertEqual(seq._raw_values[4], +0.4)
 
-        # TRR_back = seq.add_move_slot(TRR, -2.3, alias='TRR_back', relative=False)
-        # TRC_back = seq.add_move_slot(TRC, 3, alias='TRC_back', relative=True)
-
-
-# TODO
-class Test_NEEL_DAC_LockIn(unittest.TestCase):
-    def test_defaults(self):
+    def test_correct_jump(self):
         dac = V(
-            name='test_defaults',
+            name='test_correct_jump',
             bitfile='bitfile',
             address='address',
             panels=[1, 2, 4],
             delay_between_steps=1,
         )
-        li = dac.lockin
-        # self.assertTrue(isinstance(seq, NEEL_DAC_Sequencer))
-        #
-        # self.assertEqual(len(seq.slots), 0)
-        # self.assertEqual(len(seq.used_channels), 0)
-        # self.assertEqual(len(seq.orders), 0)
-        # seq.set_ramp_mode(False)
-        # self.assertFalse(seq.ramp_mode())
-        # seq.set_sample_count(3)
-        # self.assertEqual(seq.sample_counts(), 3)
+        seq = dac.sequencer
+
+        """
+        NO jump order / NO loop / NO end_presequence flag --> add end order
+        """
+        seq.reset()
+        seq.add_slot_wait(1)  # ms
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.repeat_sequence(n=1)
+        self.assertEqual(seq.get_last_slot_index(), 2)
+
+        seq.start()
+        self.assertEqual(seq.get_last_slot_index(), 3)
+        self.assertEqual(seq.orders[3], ['jump', 3])
+        self.assertEqual(seq.flags['end_sequence'], 4)
+
+        """
+        YES jump order (end) / NO loop / NO end_presequence flag --> no change
+        """
+        seq.reset()
+        seq.add_slot_wait(1)  # ms
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.add_slot_end()
+        seq.repeat_sequence(n=1)
+        self.assertEqual(seq.get_last_slot_index(), 3)
+
+        seq.start()
+        self.assertEqual(seq.get_last_slot_index(), 3)
+        self.assertEqual(seq.orders[3], ['jump', 3])
+        self.assertEqual(seq.flags['end_sequence'], 4)
+
+        """
+        YES jump order (not end) / NO loop / NO end_presequence flag --> change jump value to last index
+        """
+        seq.reset()
+        seq.add_slot_wait(1)  # ms
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.add_slot_jump(1)
+        seq.repeat_sequence(n=1)
+        self.assertEqual(seq.get_last_slot_index(), 3)
+
+        seq.start()
+        self.assertEqual(seq.get_last_slot_index(), 3)
+        self.assertEqual(seq.orders[3], ['jump', 3])
+        self.assertEqual(seq.flags['end_sequence'], 4)
+
+        """
+        YES jump order (end) + extra slots/ NO loop / NO end_presequence flag --> remove extra slots
+        """
+        seq.reset()
+        seq.add_slot_wait(1)  # ms
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.add_slot_end()
+        seq.add_slot_jump(0)
+        seq.add_slot_jump(1)
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.repeat_sequence(n=1)
+        self.assertEqual(seq.get_last_slot_index(), 6)
+
+        seq.start()
+        self.assertEqual(seq.get_last_slot_index(), 3)
+        self.assertEqual(seq.orders[-1], ['jump', 3])
+        self.assertEqual(seq.flags['end_sequence'], 4)
+
+        """
+        NO jump order / YES loop / NO end_presequence flag --> add jump to 0
+        """
+        seq.reset()
+        seq.add_slot_wait(1)  # ms
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.repeat_sequence(n=2)
+        self.assertEqual(seq.get_last_slot_index(), 2)
+
+        seq.start()  # add jump order
+        self.assertEqual(seq.get_last_slot_index(), 3)
+        self.assertEqual(seq.orders[-1], ['jump', 0])
+        self.assertEqual(seq.flags['end_presequence'], 0)
+
+        """
+        NO jump order / YES loop / YES end_presequence flag --> add jump to end_presequence
+        """
+        seq.reset()
+        seq.add_slot_wait(1)  # ms
+        seq.flag_end_presequence()  # index = 2
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.repeat_sequence(n=2)
+        self.assertEqual(seq.get_last_slot_index(), 2)
+        self.assertEqual(seq.flags['end_presequence'], 2)
+
+        seq.start()
+        self.assertEqual(seq.get_last_slot_index(), 3)
+        self.assertEqual(seq.orders[-1], ['jump', 2])
+        self.assertEqual(seq.flags['end_presequence'], 2)
+
+        """
+        NO jump order / NO loop / YES end_presequence flag --> add jump to last index
+        """
+        # Check jump value WITHOUT repetitions and WITH pre_sequence flag
+        seq.reset()
+        seq.add_slot_wait(1)  # ms
+        seq.flag_end_presequence()
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.repeat_sequence(n=1)
+        self.assertEqual(seq.get_last_slot_index(), 2)
+        self.assertEqual(seq.flags['end_presequence'], 2)
+
+        seq.start()
+        self.assertEqual(seq.get_last_slot_index(), 3)
+        self.assertEqual(seq.orders[-1], ['jump', 3])
+        self.assertEqual(seq.flags['end_presequence'], 2)
+
+        """
+        YES jump order (end) / YES loop / YES end_presequence flag --> update jump value to end_presequence
+        """
+        seq.reset()
+        seq.add_slot_wait(1)  # ms
+        seq.flag_end_presequence()
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.add_slot_end()
+        seq.repeat_sequence(n=2)
+        self.assertEqual(seq.flags['end_presequence'], 2)
+
+        seq.start()
+        self.assertEqual(seq.orders[-1], ['jump', 2])
+
+        """
+        YES jump order (not end) / YES loop / YES end_presequence flag --> update end_presequence flag
+        """
+        seq.reset()
+        seq.add_slot_wait(1)  # ms
+        seq.flag_end_presequence()
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.add_slot_jump(1)
+        seq.repeat_sequence(n=2)
+        self.assertEqual(seq.flags['end_presequence'], 2)
+
+        seq.start()
+        self.assertEqual(seq.orders[-1], ['jump', 1])
+        self.assertEqual(seq.flags['end_presequence'], 1)
+
+        """
+        YES jump order (not end) / YES loop / NO end_presequence flag --> update end_presequence flag
+        """
+        # Check jump value WITH repetitions, WITHOUT pre_sequence flag and manual jump
+        seq.reset()
+        seq.add_slot_wait(1)  # ms
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.add_slot_jump(2)
+        seq.repeat_sequence(n=2)
+        self.assertEqual(seq.flags['end_presequence'], 0)
+
+        seq.start()  # it updates end_presequence
+        self.assertEqual(seq.orders[-1], ['jump', 2])
+        self.assertEqual(seq.flags['end_presequence'], 2)
+
+    def test_sample_count_ramp(self):
+        dac = V(
+            name='test_sample_count',
+            bitfile='bitfile',
+            address='address',
+            panels=[1, 2, 4],
+            delay_between_steps=1,
+        )
+        seq = dac.sequencer
+        seq.reset()
+        seq.ramp_mode(True)
+        seq.sample_time(1)
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.add_slot_move(dac.p2.c2.v, 0.0)
+        w = seq.add_slot_wait(0.5)
+        seq.add_slot_trigger([0, 0, 0, 0, 0])
+        seq.add_slot_trigger([0, 1, 0, 0, 0])
+        seq.add_slot_end()
+
+        """
+        NO loop / NO end_presequence flag / NO long wait 
+        """
+        w(0.5)
+        seq.repeat_sequence(n=1)
+        seq.start()
+        self.assertEqual(seq.sample_count(), 2)
+
+        """
+        NO loop / NO end_presequence flag / YES long wait
+        """
+        w(1.5)
+        seq.repeat_sequence(n=1)
+        seq.start()
+        self.assertEqual(seq.sample_count(), 3)
+
+        """
+        YES loop / NO end_presequence flag / NO long wait
+        """
+        w(0.5)
+        seq.repeat_sequence(n=10)
+        seq.start()
+        self.assertEqual(seq.sample_count(), 2 * 10)
+
+        """
+        YES loop (infinite) / NO end_presequence flag / NO long wait
+        """
+        w(0.5)
+        seq.repeat_infinite()
+        seq.start()
+        self.assertEqual(seq.sample_count(), 0)
+
+        """
+        YES loop / YES end_presequence flag / NO long wait
+        """
+        seq.reset()
+        seq.ramp_mode(True)
+        seq.sample_time(1)
+        seq.add_slot_trigger([0, 0, 0, 0, 0])
+        seq.add_slot_trigger([0, 1, 0, 0, 0])
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.add_slot_move(dac.p2.c2.v, 0.0)
+        w = seq.add_slot_wait(0.5)
+        seq.flag_end_presequence()
+        seq.add_slot_move(dac.p1.c1.v, 0.0)
+        seq.add_slot_move(dac.p2.c2.v, 0.0)
+        seq.add_slot_end()
+
+        seq.repeat_sequence(n=10)
+        seq.start()
+        self.assertEqual(seq.sample_count(), 2 + 2 * 10)
+
+
+# TODO
+# class Test_NEEL_DAC_LockIn(unittest.TestCase):
+#     def test_defaults(self):
+#         dac = V(
+#             name='test_defaults',
+#             bitfile='bitfile',
+#             address='address',
+#             panels=[1, 2, 4],
+#             delay_between_steps=1,
+#         )
+#         li = dac.lockin
+#         # self.assertTrue(isinstance(seq, NEEL_DAC_Sequencer))
+#         #
+#         # self.assertEqual(len(seq.slots), 0)
+#         # self.assertEqual(len(seq.used_channels), 0)
+#         # self.assertEqual(len(seq.orders), 0)
+#         # seq.set_ramp_mode(False)
+#         # self.assertFalse(seq.ramp_mode())
+#         # seq.set_sample_count(3)
+#         # self.assertEqual(seq.sample_counts(), 3)
 
 
 if __name__ == '__main__':
