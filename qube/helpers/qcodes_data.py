@@ -3,7 +3,7 @@ import os
 import numpy as np
 import qcodes as qc
 from IPython.core.display import Markdown, Latex
-from IPython.core.display_functions import display
+# from IPython.core.display_functions import display
 
 from qube.postprocess.figures import Plot1D, Plot2D
 from qube.postprocess.dataset import Dataset, Axis

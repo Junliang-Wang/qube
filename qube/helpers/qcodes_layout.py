@@ -7,7 +7,7 @@ import numpy as np
 import qcodes as qc
 
 import qube
-from qube.helpers.qufox_layout import LayoutContent
+# from qube.helpers.qufox_layout import LayoutContent
 from qube.layout.gds import LayoutGDS
 
 controls_name = 'controls'

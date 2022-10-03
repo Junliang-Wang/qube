@@ -5,7 +5,6 @@ Modified 2021/02 by Hermann for usage at Wodan; look for "HE:"
 Updated 2022/09 by Junliang
 """
 
-from math import ceil
 import logging
 from collections import OrderedDict
 from typing import Union, List, Optional
@@ -143,6 +142,28 @@ def split_FS_channel(number):
     panel = number // 8
     channel = number % 8
     return panel, channel
+
+
+def floor_decimal(number, decimal):
+    """
+    number: input number to be rounded down
+    decimal: final number of decimals after rounded down
+    """
+    fact = 10 ** decimal
+    n = number * fact
+    n = floor(n) / fact
+    return n
+
+
+def ceil_decimal(number, decimal):
+    """
+    number: input number to be rounded up
+    decimal: final number of decimals after rounded up
+    """
+    fact = 10 ** decimal
+    n = number * fact
+    n = ceil(n) / fact
+    return n
 
 
 """----------------
@@ -559,7 +580,7 @@ class NEEL_DAC_Sequencer(InstrumentChannel):
     delay_trigger = 0.028  # us
     delay_jump = 0.488  # us
 
-    ramp_wait_correction = 0.951  # for sample_time > 500 us
+    # ramp_wait_correction = 0.951  # for sample_time > 500 us
 
     def __init__(self,
                  parent: Instrument,
@@ -802,8 +823,9 @@ class NEEL_DAC_Sequencer(InstrumentChannel):
                 moves.append(value)
 
         st = self.sample_time()
-        fact = st * self.ramp_wait_correction
-        sc_wait = sum([vi // fact for vi in waits])
+        # Wait value has been corrected with the factor
+        fact = st  # * self.ramp_wait_correction
+        sc_wait = sum([ceil_decimal(vi, 2) // fact for vi in waits])
         sc_move = len(moves)
         sc = int(sc_wait + sc_move)
         return sc
@@ -836,7 +858,9 @@ class NEEL_DAC_Sequencer(InstrumentChannel):
                 time_us += self.delay_trigger
             elif order == 'wait':
                 value = value * 1e3  # to us
-                time_us += self.delay_wait_offset + value * self.delay_wait_value
+                # raw_value of wait has been corrected with self.delay_wait_value
+                # therefore value in self.orders is the good one
+                time_us += self.delay_wait_offset + value  # * self.delay_wait_value
             elif order == 'jump':  # jump means end of sequence
                 time_us += self.delay_jump
                 break
@@ -1117,9 +1141,10 @@ class NEEL_DAC_Sequencer(InstrumentChannel):
             return self.orders[index][1]
 
         def _set(v):
+            corrected_v = v / self.delay_wait_value
             self.orders[index][1] = v
-            self._raw_values[index] = v
-            self._set_slot_wait(v, index)
+            self._raw_values[index] = corrected_v
+            self._set_slot_wait(corrected_v, index)
 
         name = str(alias) if alias else f's{index}_wait'
         label = f'[{index}] {name}' if alias else f'[{index}] Wait'
