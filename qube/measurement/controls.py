@@ -302,13 +302,11 @@ class Controls(InstrumentBase):
 
     def _get_move_cmds(self, controls: list):
         cs = [self._get_delegate_parameter(ci, as_instance=True) for ci in controls]
-        move_cmds = list()
-        for control in cs:
-            move_cmd_id = control.metadata[str_mv_cmd_id]
-            has_move_cmd = move_cmd_id is not None
-            stored_move_cmd = move_cmd_id in move_cmds
-            if has_move_cmd and not stored_move_cmd:
-                move_cmds.append(self._move_commands[move_cmd_id])  # Memorize move command
+        idxs = [ci.metadata[str_mv_cmd_id] for ci in cs]
+        idxs = set(idxs)
+        if None in idxs:
+            idxs.remove(None)
+        move_cmds = [self._move_commands[idx] for idx in idxs]
         return move_cmds
 
     def _apply_move_cmds(self, controls: list):

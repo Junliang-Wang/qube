@@ -198,7 +198,6 @@ class NEEL_DAC(Instrument):
         self.bitfile = bitfile
         self.address = address
         self.ref = None  # FPGA reference
-        self.last_retrieved_values = None  # array of panels x channels
         self.open()
 
         # Hardware limitations
@@ -206,8 +205,8 @@ class NEEL_DAC(Instrument):
         self.max_channels = 8
         self.bits_resolution = 15  # 2**bits
         self.voltage_range = 5.0  # +/- value
-        self.min_value = float(min_value) if min_value else -self.voltage_range
-        self.max_value = float(max_value) if max_value else +self.voltage_range
+        self.min_value = float(min_value) if min_value is not None else -self.voltage_range
+        self.max_value = float(max_value) if max_value is not None else +self.voltage_range
 
         # Parameters
         self._panels = panels
@@ -370,19 +369,18 @@ class NEEL_DAC(Instrument):
         order_number = join_8_8bit264bit(1, 4, 0, 0, panel, channel, a, b)
         self.send_Xmit_order(order_number)
 
-    def get_values(self, precision: int = 4, from_buffer: bool = False):
-        if self.last_retrieved_values is None or from_buffer is False:
-            value = self.get_current_values()
-        else:
-            value = self.last_retrieved_values
-        return np.round(value, precision)
-
-    def get_current_values(self):
+    def get_values(self, precision: Optional[int] = 4):
         """
         Get current values of DAC
         """
         # TODO: move this block to dac.panel.channel and check if panel or channel is first
+        values = np.zeros((self.max_panels, self.max_channels), dtype=float)
+        for panel in self.panels():
+            for channel in range(self.max_channels):
+                values[panel, channel] = self.get_value(panel, channel, precision)
+        return values
 
+    def get_value(self, panel, channel, precision: Optional[int] = 4):
         # Get rid of an eventual unfinished retrieving sequence
         get_value = self.ref.registers['get DAC value']
         got_value = self.ref.registers['got DAC value']
@@ -394,30 +392,25 @@ class NEEL_DAC(Instrument):
         retrieve = self.ref.registers['DAC to retrieve']
         data = self.ref.registers['DAC data']
 
-        max_num = self.max_panels * self.max_channels
         res = 2 ** self.bits_resolution
         vrange = self.voltage_range
         to_real_unit = lambda v: (v - res) / res * vrange
 
-        values = np.zeros((self.max_panels, self.max_channels), dtype=float)
-        for i in range(max_num):
-            retrieve.write(i)
-            got_value.write(True)
-            get_value.write(True)
-            j = 0
-            while got_value.read():
-                j += 1
-            value = data.read()
-            panel_channel, value = split_number(value, size=32)
-            panel = int(panel_channel) // self.max_panels
-            channel = int(panel_channel) % self.max_channels
-
-            value = to_real_unit(value)
-            values[panel, channel] = value
-
-            got_value.write(True)
-        self.last_retrieved_values = values
-        return values
+        num = panel * self.max_panels + channel
+        retrieve.write(num)
+        got_value.write(True)
+        get_value.write(True)
+        while got_value.read():
+            pass
+        value = data.read()
+        panel_channel, value = split_number(value, size=32)
+        # panel = int(panel_channel) // self.max_panels
+        # channel = int(panel_channel) % self.max_channels
+        value = to_real_unit(value)
+        got_value.write(True)
+        if precision:
+            value = np.round(value, precision)
+        return value
 
     """===================================
     get/set for parameters
@@ -522,16 +515,15 @@ class NEEL_DAC_Channel(InstrumentChannel):
                  parent: InstrumentChannel,
                  name: str,
                  channel: int,
-                 value: float = -0.0003,  # JL: weird default value
+                 # value: float = -0.0003,  # JL: weird default value
                  alias: str = None,
                  **kwargs) -> None:
         super().__init__(parent, name, **kwargs)
         self.dac = self._parent.dac
         self.panel = self._parent.panel_number
         self.channel = channel
-        self.value = value
+        self._v = None
         self.alias = alias  # JL: not used?
-        self.last_retrieved_value = None
 
         self.add_parameter('v',
                            label='Value',
@@ -545,16 +537,15 @@ class NEEL_DAC_Channel(InstrumentChannel):
                            )
 
     def get_value(self):
-        arr = self.dac.get_values()
-        return arr[self.panel, self.channel]
+        return self.dac.get_value(self.panel, self.channel)
 
     def set_value(self, value: float):
         # Set DAC value if it is not np.nan.
         if not np.isnan(value):
-            self.dac.move_to(panel=self.panel, channel=self.channel, value=value)
-            # self._send_value_order(value)
+            # self.dac.move_to(panel=self.panel, channel=self.channel, value=value)
+            self.dac._send_value_order(panel=self.panel, channel=self.channel, value=value)
             # self.dac.move(wait_until_end=wait_until_end)
-        # self.value = value
+        self._v = value
 
 
 class NEEL_DAC_Sequencer(InstrumentChannel):

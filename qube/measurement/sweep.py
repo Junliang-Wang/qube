@@ -101,6 +101,7 @@ def register_pre_and_post_process(
         else:
             meas.add_after_run(post_process[0], args=post_process[1])
 
+import time
 
 class Sweep(InstrumentBase):
     """
@@ -233,6 +234,9 @@ class Sweep(InstrumentBase):
         self.register_pre_and_post_readout(pre_readout, post_readout)
         function_apply(initial_config)  # Apply initial values of the controls
 
+        meas_time = 0
+        save_time = 0
+        apply_time = 0
         with meas.run() as datasaver:  # Start measurement
 
             self.write_sweep_info(datasaver, note, return2initial, fast_sweep)
@@ -243,25 +247,35 @@ class Sweep(InstrumentBase):
                 # >> index_list << contains index pointers to each sweep-parameter value for each step.
 
                 # Show progress of measurement:
-                self.progress_update(i, index_matrix.shape[0], show_time_estimation, show_progress_bar)
+                if show_progress_bar:
+                    self.progress_update(i, index_matrix.shape[0], show_time_estimation, show_progress_bar)
 
                 # Set sweep values:
+                start = time.time()
                 targets = self.get_target_values(index_list)  # Get target values for current indices
                 function_apply(targets)  # Apply target values to sweep controls
+                apply_time += time.time() - start
 
                 # Perform measurement:
                 self.apply_pre_readout()
                 if wait_pre_readout:
                     time.sleep(float(wait_pre_readout))
+                start = time.time()
                 measures = function_readout(readouts)  # Measure data on readout devices
+                meas_time += time.time() - start
                 if wait_post_readout:
                     time.sleep(float(wait_pre_readout))
                 self.apply_post_readout()
+                start = time.time()
                 datasaver.add_result(*tuple(measures))  # Store measurement to database
+                save_time += time.time() - start
 
             if return2initial:
                 function_apply(initial_config)
-
+            print(f'Timing for {i+1} loops:')
+            print(f'\t apply: {apply_time/(i+1)} s')
+            print(f'\t readout: {meas_time/(i+1)} s')
+            print(f'\t save: {save_time/(i+1)} s')
             return datasaver.run_id
 
     def register_sweep_info(self,
