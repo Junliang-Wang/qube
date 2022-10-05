@@ -72,7 +72,9 @@ class RS_SMB100A(VisaInstrument):
         self.add_parameter('modulation',
                            get_cmd=':MOD?',
                            set_cmd=':MOD' + ' {}',
-                           vals=vals.Enum(0, 1, 'OFF', 'ON'))
+                           get_parser=int,
+                           vals=vals.Enum(0, 1, 'OFF', 'ON'),
+                           )
         self.add_parameter('alc',
                            get_cmd=':POW:ALC?',
                            set_cmd=':POW:ALC' + ' {}',
@@ -82,6 +84,7 @@ class RS_SMB100A(VisaInstrument):
         self.add_parameter('pulse_mod',
                            get_cmd=':PULM:STAT?',
                            set_cmd=':PULM:STAT' + ' {}',
+                           get_parser=int,
                            vals=vals.Enum(0, 1, 'OFF', 'ON'))
         self.add_parameter('pulse_src',
                            get_cmd=':PULM:SOUR?',

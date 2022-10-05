@@ -190,13 +190,15 @@ class Controls(InstrumentBase):
         self._apply_move_cmds(readouts)
 
         output = dict()
-        for readout in readouts:
+        for key in readouts:
+            readout = self.get_readout(key, as_instance=True)
             key = readout if key_as_instance else readout.name
             output[key] = readout()
         return output
 
-    def readout(self, *args, **kwargs):
-        return self.get_readout_values(*args, **kwargs)
+    def readout(self, readouts: list = None):
+        readouts_dict = self.get_readout_values(readouts=readouts, key_as_instance=True)
+        return list(readouts_dict.items())
 
     # def readout_dict(self, readouts: list = None, key_as_instance: bool = False):
     #     """
@@ -547,8 +549,12 @@ class Controls(InstrumentBase):
 
         # If any control of the instruction is passed as string (control name),
         # then turn it into the qcodes-parameter instance of the control:
-        for k in np.arange(len(instructions)):
-            instructions[k][1] = self._turn_key_to_instance(instructions[k][1])
+        for i, instr in enumerate(instructions):
+            dim, param, values = instr
+            param = self._turn_key_to_instance(param) if param is not None else None
+            instructions[i][1] = param
+        # for k in np.arange(len(instructions)):
+        #     instructions[k][1] = self._turn_key_to_instance(instructions[k][1])
         kwargs[var_str_instr] = instructions
 
         # If no readouts are provided, use readouts of Controls object.

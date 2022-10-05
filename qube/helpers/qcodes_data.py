@@ -4,7 +4,6 @@ import numpy as np
 import qcodes as qc
 from IPython.core.display import Markdown, Latex
 # from IPython.core.display_functions import display
-
 from qube.postprocess.figures import Plot1D, Plot2D
 from qube.postprocess.dataset import Dataset, Axis
 from qube.postprocess.datafile import Datafile
@@ -95,8 +94,8 @@ def get_exp_and_sample():
 
 def set_config(config:list = None):
     """
-    This function applies a bunch of values on a set of qcodes paramters.
-    The configuration mustw be provided in the form of a nested list having the following shape:
+    This function applies a bunch of values on a set of qcodes paramaters.
+    The configuration must be provided in the form of a nested list having the following shape:
     [
         [ reference_to_qcodes_parameter_1 , value_1 ], # item 0
         [ reference_to_qcodes_parameter_2 , value_2 ], # item 1

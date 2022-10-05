@@ -3,13 +3,16 @@ import numpy as np
 import os
 from qube.utils.path import is_file, get_filename, get_folder, remove_extension, mkdir_if_not_exist, \
     find_unused_in_folder
-from qube.postprocess.dataset import Dataset, Axis
+from qube.postprocess.dataset import Dataset, Axis, Static
 
 
 class Datafile(object):
-    def __init__(self):
+    def __init__(self, fullpath=None):
         self.datasets = []
+        self.statics = []  # TODO
         self.fullpath = None
+        if fullpath:
+            self.load(fullpath)
 
     @property
     def filename(self):
@@ -90,6 +93,59 @@ class Datafile(object):
 
     def remove_dataset(self, name):
         self.remove_datasets_by_name(name, exact_match=True)
+
+    """ 
+    Quick and dirty statics 
+    Create a DataGroup or DataCollection class
+    Not saved for the moment...
+    """
+    def clear_statics(self):
+        self.statics = []
+
+    def add_static(self, static):
+        if isinstance(static, Static):
+            self.statics.append(static)
+        else:
+            raise Exception(f'dataset must be an instance of {Static}')
+
+    def add_statics(self, *statics):
+        for st in statics:
+            self.add_static(st)
+
+    def get_statics_by_name(self, name, exact_match=True):
+        statics = []
+        for dsi in self.statics:
+            ds_name = dsi.name
+            if exact_match and ds_name == name:
+                statics.append(dsi)
+            elif not exact_match and name in ds_name:
+                statics.append(dsi)
+        return statics
+
+    def remove_statics_by_name(self, name, exact_match=True):
+        statics = self.statics
+        new_statics = []
+        for dsi in statics:
+            remove = False
+            ds_name = dsi.name
+            if exact_match and ds_name == name:
+                remove = True
+            elif not exact_match and name in ds_name:
+                remove = True
+            if not remove:
+                new_statics.append(dsi)
+        self.clear_datasets()
+        self.add_datasets(*new_statics)
+
+    def get_static(self, name):
+        statics = self.get_statics_by_name(name, exact_match=True)
+        if len(statics) == 0:
+            raise KeyError(f'"{name}" dataset not found')
+        else:
+            return statics[0]
+
+    def remove_static(self, name):
+        self.remove_statics_by_name(name, exact_match=True)
 
     def load(self, fullpath=None):
         if fullpath is None:

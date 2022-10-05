@@ -1506,7 +1506,7 @@ class NEEL_DAC_LockIn(InstrumentChannel):
         super().__init__(parent, 'lock_in', **kwargs)
         self.dac = self._parent
         self._status = False
-        self._frequency = 0  # Hz
+        self._frequency = 1  # Hz
         self._amplitude = 0  # V
         self._channel = [0, 0]  # [panel, channel]
 
@@ -1514,7 +1514,7 @@ class NEEL_DAC_LockIn(InstrumentChannel):
                            label='Lock-in status',
                            get_cmd=self.get_status,
                            set_cmd=self.set_status,
-                           # initial_value=self._status,
+                           initial_value=self._status,
                            )
 
         self.add_parameter('frequency',
@@ -1525,8 +1525,8 @@ class NEEL_DAC_LockIn(InstrumentChannel):
                            get_parser=float,
                            set_parser=float,
                            post_delay=0.45,  # HE: wait after move such that the lock-in-detector can follow
-                           vals=vals.Numbers(0.0, 50000.0),
-                           # initial_value=self._frequency,
+                           vals=vals.Numbers(1.0, 50000.0),
+                           initial_value=self._frequency,
                            )
 
         self.add_parameter('amplitude',
@@ -1538,7 +1538,7 @@ class NEEL_DAC_LockIn(InstrumentChannel):
                            set_parser=float,
                            post_delay=0.45,  # HE: wait after move such that the lock-in-detector can follow
                            # vals=vals.Numbers(0.0, abs(self.dac.voltage_range)),
-                           # initial_value=self._amplitude,
+                           initial_value=self._amplitude,
                            )
 
         self.add_parameter('channel',  # HE
@@ -1548,7 +1548,7 @@ class NEEL_DAC_LockIn(InstrumentChannel):
                            get_parser=list,
                            set_parser=list,
                            vals=vals.Lists(vals.Ints(0, self.dac.max_channels)),
-                           # initial_value=self._channel,
+                           initial_value=self._channel,
                            )
 
         self.configure_analysis()

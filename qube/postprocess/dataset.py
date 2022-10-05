@@ -152,7 +152,7 @@ class ArrayData(Data):
 class Static(ArrayData):
     """
     This class stores a single array data.
-
+    TODO: it does not need to be a array
     """
 
     def __init__(self, *args, **kwargs):
