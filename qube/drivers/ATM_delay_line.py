@@ -3,7 +3,7 @@
 Program to control the delay line ATM PNR P1608-SM24
 
 Usage: 
-if the device has been turned off at a position different from zero
+if the device has been moved or turned off at a position different from zero
         -With the power unplugged, screw counterclockwise all the way to the end
         -ATM_delay_line.init(0)            This command move the line slightly to the left (used to get away from the end reached while screwing)
         -ATM_delay_line.set_zero(0)         This command set the current position as zero reference for the system. 
@@ -12,7 +12,7 @@ When zero position has been correctly set
 Before closing:
         -ATM_delay_line.delay(0)           Not mandatory but saves you to reset the position on start up again.
 
-Parameters: acceleration, deceleration, maximum_velocity and initial velocity might be tweaked to reduce the movement time.
+Parameters: acceleration, deceleration, maximum_velocity and initial velocity light be tweaked to reduce the movement time.
 
 The delay is computed in picoseconds relatively to the zero position and it's not an absolute number.
 Imporant notes:
@@ -56,15 +56,15 @@ class ATM_delay_line(VisaInstrument):
     def __init__(self, name, address, **kwargs):
 
         super().__init__(name, address, terminator="\r", **kwargs)
-        
+        self.term_chars='\n'
         self.add_parameter(
-            name='echo_mode',                                   #useless parameter but must be set to 2 for the program to work
+            name='echo_mode',
             set_cmd='EM {:d}',
             get_cmd=False, 
             set_parser=int,
-            initial_value=2,                        
+            initial_value=2,
         )
-
+        
         self.add_parameter(
             name="baud_rate1",                                 #unused parameter
             set_cmd='BD {:d}',
@@ -176,11 +176,11 @@ class ATM_delay_line(VisaInstrument):
         self._move_step(steps_to_move)                         #actual movement
         time.sleep(0.01)
         moving = self._moving_flag()                           #check every 0.01 seconds if the movement has finished
-        print('Waiting for move to finish.')
+        print('Waiting for move to finish.        ', end='\r')
         while moving:
             time.sleep(0.01)
             moving = self._moving_flag()
-        print('Done.')
+        print('Done.                                ', end='\r')
 
 
   
