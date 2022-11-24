@@ -7,16 +7,16 @@ Updated 2022/09 by Junliang
 
 import logging
 from collections import OrderedDict
-from typing import Union, List, Optional
-import numpy as np
 from math import ceil, floor
+from typing import Union, List, Optional
 
+import numpy as np
 from nifpga import Session
 from qcodes import Instrument, Parameter, DelegateParameter
 from qcodes import validators as vals
 from qcodes.instrument.channel import InstrumentChannel
 
-from qube.utils.misc import rhasattr, rgetattr
+from qube.utils.misc import rhasattr
 
 log = logging.getLogger(__name__)
 
@@ -1557,7 +1557,7 @@ class NEEL_DAC_LockIn(InstrumentChannel):
         """
         self.status(True)
 
-    def send_Xmit_order(self, order: int, stop: bool = True):
+    def send_Xmit_order(self, order: int, stop: bool = False):
         """
         order: Xmit order
         stop: flag to stop lock-in output before sending the order
@@ -1586,7 +1586,7 @@ class NEEL_DAC_LockIn(InstrumentChannel):
         """
         self._frequency = value
         order_number = self._Xmit_order_frequency(value)
-        self.send_Xmit_order(order_number, stop=True)
+        self.send_Xmit_order(order_number, stop=False)
 
     def _Xmit_order_frequency(self, value: float):
         f = 25000 / value
@@ -1607,7 +1607,7 @@ class NEEL_DAC_LockIn(InstrumentChannel):
     def set_amplitude(self, value: float):
         self._amplitude = np.abs(value)
         order_number = self._Xmit_order_amplitude(value)
-        self.send_Xmit_order(order_number, stop=True)
+        self.send_Xmit_order(order_number, stop=False)
 
     def _Xmit_order_amplitude(self, value: float):
         vrange = abs(self.dac.voltage_range)
@@ -1629,7 +1629,7 @@ class NEEL_DAC_LockIn(InstrumentChannel):
     def set_channel(self, value: List[int]):
         panel, channel = value
         order_number = join_8_8bit264bit(2, 1, 0, 0, 0, 0, panel, channel)
-        self.send_Xmit_order(order_number, stop=True)
+        self.send_Xmit_order(order_number, stop=False)
         self._channel = value
 
     def set_channel_by_param(self, param: Union[Parameter, DelegateParameter, NEEL_DAC_Channel]):
@@ -1664,7 +1664,7 @@ class NEEL_DAC_LockIn(InstrumentChannel):
         JL: What is this?
         """
         order_number = join_8_8bit264bit(3, 1, 0, 0, 0, 0, 0, value)
-        self.send_Xmit_order(order_number, stop=True)
+        self.send_Xmit_order(order_number, stop=False)
 
     def set_analysis_dt_over_tau(self, value):
         """
@@ -1675,11 +1675,11 @@ class NEEL_DAC_LockIn(InstrumentChannel):
         order_number = join_numbers(3, 2, 16)
         order_number = join_numbers(order_number, 0, 32)
         order_number = join_numbers(order_number, dt_over_tau, 64)
-        self.send_Xmit_order(order_number, stop=True)
+        self.send_Xmit_order(order_number, stop=False)
 
     def set_analysis_null(self):
         order_number = join_8_8bit264bit(3, 0, 0, 0, 0, 0, 0, 0)
-        self.send_Xmit_order(order_number, stop=True)
+        self.send_Xmit_order(order_number, stop=False)
 
     def set_analysis_voltage_range(self, value: int):
         """
@@ -1687,7 +1687,7 @@ class NEEL_DAC_LockIn(InstrumentChannel):
         JL: What is this?
         """
         order_number = join_8_8bit264bit(3, 3, 0, 0, 0, 0, 0, value)
-        self.send_Xmit_order(order_number, stop=True)
+        self.send_Xmit_order(order_number, stop=False)
 
 
 class Virtual_NEEL_DAC(NEEL_DAC):
@@ -1729,6 +1729,11 @@ class Virtual_NEEL_DAC(NEEL_DAC):
     def get_values(self, *args, **kwargs):
         return self._values
 
+    def get_value(self, panel, channel, precision: Optional[int] = 4):
+        p = getattr(self, f'p{panel}')
+        c = getattr(p, f'c{channel}')
+        return c.v()
+
     def set_values(self, arr):
         """
         arr: array of values with shape (max_panels x max_channels) --> same as get_values()
@@ -1759,6 +1764,8 @@ class Virtual_NEEL_DAC_Channel(NEEL_DAC_Channel):
         self.value = value
         self.dac._values[self.panel, self.channel] = value
 
+    def get_value(self):
+        return self.dac._values[self.panel, self.channel]
 
 if __name__ == '__main__':
     from qube.measurement.controls import Controls
