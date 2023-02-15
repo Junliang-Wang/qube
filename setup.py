@@ -24,7 +24,7 @@ install_requires = [
 ]
 
 setuptools.setup(
-    name="qube",
+    name="qube-qcodes",
     version=__version__,
     author=__author__,
     author_email=__email__,
