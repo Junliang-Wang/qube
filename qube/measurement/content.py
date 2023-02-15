@@ -10,7 +10,7 @@ from qube.postprocess.dataset import Dataset, Axis, Static
 
 
 def qcodes_to_datafile(ds: DataSetProtocol = None) -> Datafile:
-    expc_class = _find_loader(ds)
+    expc_class = find_loader(ds)
     expc = expc_class(ds)
     return expc.to_datafile()
 
@@ -443,7 +443,7 @@ class SweeperContent(ExpContent):
             raise ValueError(f'Invalid qcodes dataset. It does not contain sweep information.')
 
 
-def _find_loader(ds: DataSetProtocol = None):
+def find_loader(ds: DataSetProtocol = None):
     qc_data = ds.get_parameter_data()
     if 'return2initial' in qc_data.keys():
         return QcodesDatasetContent
@@ -451,3 +451,6 @@ def _find_loader(ds: DataSetProtocol = None):
         return SweeperContent
     else:
         raise ValueError('Not found a valid loading protocol')
+
+# alias for backward compatibility
+_find_loader = find_loader

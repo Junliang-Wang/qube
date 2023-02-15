@@ -1,7 +1,6 @@
 import datetime
 import time
-from collections.abc import Iterable, Iterator
-from typing import List, Union, Callable, Dict, Any, Set
+from typing import List, Union, Callable, Dict, Any, Set, Iterable, Iterator
 
 import numpy
 import numpy as np
@@ -62,6 +61,20 @@ def validate_qc_param(param: Any, custom_message: str = None):
     msg = 'Parameter must be a qcodes parameter' if not custom_message else str(custom_message)
     if not is_qc_param(param):
         raise TypeError(msg)
+
+
+def get_param_sources(param):
+    l = []
+    while hasattr(param, 'source'):
+        param = param.source
+        l.append(param)
+    return l
+
+
+def validate_qc_param_values(param, values):
+    sources = get_param_sources(param)
+    all_params = [param] + sources
+    [pi.validate(vi) for vi in values for pi in all_params]
 
 
 class SweepParameter(object):
@@ -535,6 +548,7 @@ class Sweeper(object):
             datasaver.run_id
         """
         self.set_config(**kwargs)
+        self._validate_sweep_values()
         self._register_sweep_params_in_meas()
         self._register_readout_params_in_meas()
         self._register_sweep_info_params_in_meas()
@@ -993,19 +1007,24 @@ class Sweeper(object):
             Generated ordered instructions:
             {}  # empty dictionary
             ...
-            {}  # lenght of the generator is total number of points (3*3=9)
+            {}  # length of the generator is total number of points (3*3=9)
         """
         self._update_sweep_params_shape()
-        instrs = []
-        for sparam in self.sweep_parameters.values():
-            instrs.append(sparam.get_ordered_instructions())
-        for instr_i in zip(*instrs):
-            d = {}
-            for instr_i_pi in instr_i:
-                param, value, apply = instr_i_pi
-                if apply:
-                    d[param] = value
-            yield d
+        only_reps = len(self.sweep_parameters) == 0
+        if only_reps:
+            for i in range(self.get_total_sweep_points()):
+                yield {}
+        else:
+            instrs = []
+            for sparam in self.sweep_parameters.values():
+                instrs.append(sparam.get_ordered_instructions())
+            for instr_i in zip(*instrs):
+                d = {}
+                for instr_i_pi in instr_i:
+                    param, value, apply = instr_i_pi
+                    if apply:
+                        d[param] = value
+                yield d
 
     def get_total_sweep_points(self):
         return np.prod(self.sweep_shape)
@@ -1197,6 +1216,11 @@ class Sweeper(object):
     def _update_sweep_params_shape(self):
         for param in self.sweep_parameters.values():
             param.set_sweep_shape(self.sweep_shape)
+
+    def _validate_sweep_values(self):
+        for qc_param, sw_param in self.sweep_parameters.items():
+            values = sw_param.values
+            validate_qc_param_values(qc_param, values)
 
     def _register_sweep_params_in_meas(self):
         meas = self.measurement

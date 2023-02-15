@@ -1,8 +1,7 @@
-from typing import List, Dict, Callable, Any
 import configparser
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from typing import List, Dict, Callable, Any, Iterable
 
 
 class ViewBase(ABC):

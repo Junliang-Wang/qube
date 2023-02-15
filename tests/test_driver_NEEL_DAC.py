@@ -3,7 +3,7 @@ import unittest
 from qcodes import Parameter
 from qcodes import validators as vals
 
-from qube import Controls
+from qube.measurement import Controls
 from qube.drivers.NEEL_DAC import Virtual_NEEL_DAC, NEEL_DAC_Sequencer
 
 V = Virtual_NEEL_DAC

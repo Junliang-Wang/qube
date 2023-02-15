@@ -1,8 +1,8 @@
 import unittest
-from qube import Controls
-from qube.measurement.sweep import Sweep
 
 from qcodes import Parameter, DelegateParameter
+
+from qube.measurement import Controls
 
 v_values = [0, 0, 0]
 y_values = [0, 0, 0]
