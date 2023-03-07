@@ -267,6 +267,7 @@ class SweeperContent(ExpContent):
         self.sweep_info.update(self._extract_static_info())
         self.datasets = self._extract_datasets()
         self.statics = self._extract_statics()
+        self.axes = self.datasets[0].axes
 
     def load_by_id(self, run_id: int, *args, **kwargs):
         ds = load_by_id(run_id, *args, **kwargs)
