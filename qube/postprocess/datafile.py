@@ -1,17 +1,21 @@
 import json
-import numpy as np
 import os
+from typing import List
+
+import numpy as np
+
+from qube.postprocess.dataset import Dataset, Axis, Static
 from qube.utils.path import is_file, get_filename, get_folder, remove_extension, mkdir_if_not_exist, \
     find_unused_in_folder
-from qube.postprocess.dataset import Dataset, Axis, Static
 
 
 class Datafile(object):
     def __init__(self, fullpath=None):
         self.datasets = []
-        self.statics = []  # TODO
+        self.statics = {}
         self.fullpath = None
         if fullpath:
+            self.set_fullpath(fullpath)
             self.load(fullpath)
 
     @property
@@ -42,6 +46,8 @@ class Datafile(object):
 
     def set_fullpath(self, fullpath):
         folder = get_folder(fullpath)
+        if folder == '':
+            folder = os.getcwd()
         filename = get_filename(fullpath, ext=False)
         self.fullpath = os.path.join(folder, filename + '.json')
         return self.fullpath
@@ -59,7 +65,7 @@ class Datafile(object):
         for ds in datasets:
             self.add_dataset(ds)
 
-    def get_datasets_by_name(self, name, exact_match=True):
+    def get_datasets_by_name(self, name, exact_match=False):
         datasets = []
         for dsi in self.datasets:
             ds_name = dsi.name
@@ -69,7 +75,7 @@ class Datafile(object):
                 datasets.append(dsi)
         return datasets
 
-    def remove_datasets_by_name(self, name, exact_match=True):
+    def remove_datasets_by_name(self, name, exact_match=False):
         datasets = self.datasets
         new_datasets = []
         for dsi in datasets:
@@ -85,67 +91,61 @@ class Datafile(object):
         self.add_datasets(*new_datasets)
 
     def get_dataset(self, name):
-        datasets = self.get_datasets_by_name(name, exact_match=True)
+        datasets = self.get_datasets_by_name(name, exact_match=False)
         if len(datasets) == 0:
             raise KeyError(f'"{name}" dataset not found')
         else:
             return datasets[0]
 
     def remove_dataset(self, name):
-        self.remove_datasets_by_name(name, exact_match=True)
+        self.remove_datasets_by_name(name, exact_match=False)
 
-    """ 
-    Quick and dirty statics 
-    Create a DataGroup or DataCollection class
-    Not saved for the moment...
-    """
     def clear_statics(self):
-        self.statics = []
+        self.statics = {}
 
-    def add_static(self, static):
-        if isinstance(static, Static):
-            self.statics.append(static)
-        else:
-            raise Exception(f'dataset must be an instance of {Static}')
-
-    def add_statics(self, *statics):
+    def add_statics(self, statics: List[Static], key: str):
         for st in statics:
-            self.add_static(st)
+            if not isinstance(st, Static):
+                raise Exception(f'dataset must be an instance of {Static}')
+        self.statics[key] = statics
 
-    def get_statics_by_name(self, name, exact_match=True):
+    def get_statics_by_name(self, name, key=None, exact_match=False):
         statics = []
-        for dsi in self.statics:
-            ds_name = dsi.name
-            if exact_match and ds_name == name:
-                statics.append(dsi)
-            elif not exact_match and name in ds_name:
-                statics.append(dsi)
+        keys = self.statics.keys() if key is None else [key]
+        for key in keys:
+            for dsi in self.statics[key]:
+                ds_name = dsi.name
+                if exact_match and ds_name == name:
+                    statics.append(dsi)
+                elif not exact_match and name in ds_name:
+                    statics.append(dsi)
         return statics
 
-    def remove_statics_by_name(self, name, exact_match=True):
-        statics = self.statics
+    def remove_statics_by_name(self, name, key=None, exact_match=False):
         new_statics = []
-        for dsi in statics:
-            remove = False
-            ds_name = dsi.name
-            if exact_match and ds_name == name:
-                remove = True
-            elif not exact_match and name in ds_name:
-                remove = True
-            if not remove:
-                new_statics.append(dsi)
+        keys = self.statics.keys() if key is None else [key]
+        for key in keys:
+            for dsi in self.statics[key]:
+                remove = False
+                ds_name = dsi.name
+                if exact_match and ds_name == name:
+                    remove = True
+                elif not exact_match and name in ds_name:
+                    remove = True
+                if not remove:
+                    new_statics.append(dsi)
         self.clear_datasets()
         self.add_datasets(*new_statics)
 
-    def get_static(self, name):
-        statics = self.get_statics_by_name(name, exact_match=True)
+    def get_static(self, name, key):
+        statics = self.get_statics_by_name(name, key=key, exact_match=False)
         if len(statics) == 0:
             raise KeyError(f'"{name}" dataset not found')
         else:
             return statics[0]
 
-    def remove_static(self, name):
-        self.remove_statics_by_name(name, exact_match=True)
+    def remove_static(self, name, key):
+        self.remove_statics_by_name(name, key=key, exact_match=False)
 
     def load(self, fullpath=None):
         if fullpath is None:
@@ -189,15 +189,15 @@ class Datafile(object):
 
     def save(self, fullpath=None, overwrite=False, automkdir=True):
         if fullpath is None:
-            fullpath = self.fullpath
+            fpath = self.fullpath
         else:
-            self.fullpath = self.set_fullpath(fullpath)
+            fpath = self.set_fullpath(fullpath)
         if automkdir:
-            mkdir_if_not_exist(fullpath)
-        fullpath = find_unused_in_folder(fullpath, overwrite)
-        self.fullpath = self.set_fullpath(fullpath)
-        self.save_json(fullpath)
-        self.save_npz(fullpath)
+            mkdir_if_not_exist(fpath)
+        fpath = find_unused_in_folder(fpath, overwrite)
+        self.set_fullpath(fpath)
+        self.save_json(self.fullpath)
+        self.save_npz(self.fullpath)
 
     def save_json(self, fullpath):
         fullpath = self.get_json_path(fullpath)
@@ -234,6 +234,7 @@ class Datafile(object):
         out = []
         out.append(f'{self.__class__.__name__}')
         out.append(f'fullpath: {self.fullpath}')
+        out.append(f'statics: {len(self.statics)} elements (keys: {list(self.statics.keys())})')
         out.append(f'datasets: {len(self.datasets)} elements')
         for i, dataset in enumerate(self.datasets):
             out.append(f'[{i}] {str(dataset)}')

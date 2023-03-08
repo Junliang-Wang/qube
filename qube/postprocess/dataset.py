@@ -305,7 +305,7 @@ class Dataset(ArrayData):
             d[key] = axis.get_dict()
         return d
 
-    def get_axes_by_name(self, name, exact_match=True):
+    def get_axes_by_name(self, name, exact_match=False):
         axes = []
         for dsi in self.axes:
             ds_name = dsi.name
@@ -315,7 +315,7 @@ class Dataset(ArrayData):
                 axes.append(dsi)
         return axes
 
-    def remove_axes_by_name(self, name, exact_match=True):
+    def remove_axes_by_name(self, name, exact_match=False):
         axes = self.get_axes(counters=False)
         new_axes = []
         for ax in axes:
@@ -331,14 +331,14 @@ class Dataset(ArrayData):
         self.add_axes(*new_axes)
 
     def get_axis(self, name):
-        axes = self.get_axes_by_name(name, exact_match=True)
+        axes = self.get_axes_by_name(name, exact_match=False)
         if len(axes) == 0:
             raise KeyError(f'"{name}" axis not found')
         else:
             return axes[0]
 
     def remove_axis(self, name):
-        self.remove_axes_by_name(name, exact_match=True)
+        self.remove_axes_by_name(name, exact_match=False)
 
     def __str__(self):
         return f'name: {self.name} - unit: {self.unit} - shape: {self.value.shape}'

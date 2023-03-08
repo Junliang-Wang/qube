@@ -438,8 +438,8 @@ class LayoutGDS(object):
         This function applies the color scheme and labels of a certain setting of gates.
         """
         self.reset_view_rc()
-        self._apply_sweep_info_to_view()
         self._apply_statics_info_to_view()
+        self._apply_sweep_info_to_view()
 
     def _apply_sweep_info_to_view(self):
         axes = self.content.get_axes()

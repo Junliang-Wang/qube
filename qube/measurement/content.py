@@ -287,11 +287,11 @@ class SweeperContent(ExpContent):
         return self.statics[key]
 
     def to_datafile(self) -> Datafile:
-        # Add datasets to datafile
         df = Datafile()
         df.add_datasets(*self.datasets)
-        # df.add_statics(*self.statics) #TODO
-        # df.metadata(self.qc_ds.snapshot)
+        for key, value in self.statics.items():
+            df.add_statics(statics=value, key=key)
+        # df.metadata = self.qc_ds.snapshot # Not implemented
         return df
 
     def _extract_sweep_info(self) -> Dict[str, Any]:
@@ -452,6 +452,7 @@ def find_loader(ds: DataSetProtocol = None):
         return SweeperContent
     else:
         raise ValueError('Not found a valid loading protocol')
+
 
 # alias for backward compatibility
 _find_loader = find_loader
