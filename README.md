@@ -1,6 +1,6 @@
 # qube
-Useful tools for experiments performed by the group of Dr. Christopher Bauerle (CNRS Neel Institute, Grenoble)
-
+Useful tools for experiments performed by the group of Dr. Christopher Bauerle (CNRS Neel Institute, Grenoble).
+Examples can be found in the "examples" folder.
 _______________________________________
 # How to install QCoDeS?
 
@@ -25,11 +25,26 @@ conda install -c conda-forge ipympl
 conda install -c conda-forge nidaqmx-python
 pip install nifpga
 ```
+_______________________________________
+# How to install qube?
 
+Easy installation:
+
+```sh
+activate qcodes
+pip install qube-qcodes
+```
+
+Dynamical installation
+1. Download qube package from GitHub
+2. Open your Anaconda/Miniconda prompt:
+    ```
+    pip install -e PACKAGE_FOLDER\qube-qcodes
+    ```
+3. If you change anything in the qube project folder, it will be applied to ```import qube```
 
 _______________________________________
 # How to start an experiment with QCoDeS?
-
 ____
 COPY the "YYYYMMDD__experiment__sample" folder into "E:/your_name/" and rename it the following way:
 
