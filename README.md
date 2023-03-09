@@ -43,6 +43,9 @@ Dynamical installation
     ```
 3. If you change anything in the qube project folder, it will be applied to ```import qube```
 
+If you encounter any error during installation, try to:
+- Update pip with conda: ```conda update pip```
+- Update jupyter: ```conda update jupyter```
 _______________________________________
 # How to start an experiment with QCoDeS?
 ____
